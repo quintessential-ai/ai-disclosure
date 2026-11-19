@@ -1,0 +1,4 @@
+/.well-known/ai-disclosure-jwks.json
+  Content-Type: application/jwk-set+json
+  Access-Control-Allow-Origin: *
+  Cache-Control: max-age=300
