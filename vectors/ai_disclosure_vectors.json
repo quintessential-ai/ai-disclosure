@@ -1,0 +1,816 @@
+{
+  "canonicalisation": "text-links/1",
+  "canonical": [
+    {
+      "name": "whitespace_a",
+      "html": "<div>Pay  USD 1.00\n<b>now</b>&nbsp;please</div>",
+      "balanced": "<div>Pay  USD 1.00\n<b>now</b> please</div>",
+      "canonical": "PayUSD1.00nowplease",
+      "content_sha256": "Yi-zzEtjy_n6gJKxcCRVeLmwEtaFlYwuI954skGGvLw",
+      "first_violation": null
+    },
+    {
+      "name": "whitespace_b",
+      "html": "<p>Pay USD 1.00 <b>now</b> please</p>",
+      "balanced": "<p>Pay USD 1.00 <b>now</b> please</p>",
+      "canonical": "PayUSD1.00nowplease",
+      "content_sha256": "Yi-zzEtjy_n6gJKxcCRVeLmwEtaFlYwuI954skGGvLw",
+      "first_violation": null
+    },
+    {
+      "name": "link",
+      "html": "<p>See <a href=\"https://x.test/a?b=1\">the clause</a>.</p>",
+      "balanced": "<p>See <a href=\"https://x.test/a?b=1\">the clause</a>.</p>",
+      "canonical": "See\u001ehttps://x.test/a?b=1\u001ftheclause.",
+      "content_sha256": "EZcZ3wdB2tNFtCTPpl_B8Xwh3mpup7DjXnXLSqN0cDQ",
+      "first_violation": null
+    },
+    {
+      "name": "link_href_whitespace",
+      "html": "<p>See <a href=\" https://x.test/\na?b=1 \">the clause</a>.</p>",
+      "balanced": "<p>See <a href=\" https://x.test/\na?b=1 \">the clause</a>.</p>",
+      "canonical": "See\u001ehttps://x.test/a?b=1\u001ftheclause.",
+      "content_sha256": "EZcZ3wdB2tNFtCTPpl_B8Xwh3mpup7DjXnXLSqN0cDQ",
+      "first_violation": null
+    },
+    {
+      "name": "link_other_target",
+      "html": "<p>See <a href=\"https://evil.test/a?b=1\">the clause</a>.</p>",
+      "balanced": "<p>See <a href=\"https://evil.test/a?b=1\">the clause</a>.</p>",
+      "canonical": "See\u001ehttps://evil.test/a?b=1\u001ftheclause.",
+      "content_sha256": "IB3nzMJJwrxi7ThpFyAIJdEErD8A846uItdsbBaRkLQ",
+      "first_violation": null
+    },
+    {
+      "name": "image",
+      "html": "<p>Chart <img src=\"https://x.test/c.png\" alt=\"ignored\"></p>",
+      "balanced": "<p>Chart <img src=\"https://x.test/c.png\" alt=\"ignored\"></p>",
+      "canonical": "Chart\u001ehttps://x.test/c.png\u001f\u001dignored\u001f",
+      "content_sha256": "-JtAV_lXJXXHiuWIhRSXMlgckLOZiaCG3WDqLFn1IVw",
+      "first_violation": null
+    },
+    {
+      "name": "safelinks",
+      "html": "<a href=\"https://eur01.safelinks.protection.outlook.com/?url=https%3A%2F%2Fx.test%2Fa%3Fb%3D1&amp;data=05%7C01\">the clause</a>",
+      "balanced": "<a href=\"https://eur01.safelinks.protection.outlook.com/?url=https%3A%2F%2Fx.test%2Fa%3Fb%3D1&amp;data=05%7C01\">the clause</a>",
+      "canonical": "\u001ehttps://x.test/a?b=1\u001ftheclause",
+      "content_sha256": "YRL99yqVT2iL3xah3tmkRK3Ply_R1TfY1LtQdlgJv7U",
+      "first_violation": null
+    },
+    {
+      "name": "safelinks_unwrapped_once",
+      "html": "<a href=\"https://EUR01.SAFELINKS.PROTECTION.OUTLOOK.COM/?url=https%3A%2F%2Fnam.safelinks.protection.outlook.com%2F%3Furl%3Dhttps%253A%252F%252Fx.test%252Fa\">the clause</a>",
+      "balanced": "<a href=\"https://EUR01.SAFELINKS.PROTECTION.OUTLOOK.COM/?url=https%3A%2F%2Fnam.safelinks.protection.outlook.com%2F%3Furl%3Dhttps%253A%252F%252Fx.test%252Fa\">the clause</a>",
+      "canonical": "\u001ehttps://nam.safelinks.protection.outlook.com/?url=https%3A%2F%2Fx.test%2Fa\u001ftheclause",
+      "content_sha256": "PhbZwYoDfR_qDkZWxiALj114SLsTt3DJLU__MOJsnfg",
+      "first_violation": null
+    },
+    {
+      "name": "safelinks_http_is_not_unwrapped",
+      "html": "<a href=\"http://a.safelinks.protection.outlook.com/?url=https%3A%2F%2Fx.test\">x</a>",
+      "balanced": "<a href=\"http://a.safelinks.protection.outlook.com/?url=https%3A%2F%2Fx.test\">x</a>",
+      "canonical": "\u001ehttp://a.safelinks.protection.outlook.com/?url=https%3A%2F%2Fx.test\u001fx",
+      "content_sha256": "A89DPmHSpqvTo2ZNMCUt2kcw0hlNsz8ZaS8exXXpuaU",
+      "first_violation": null
+    },
+    {
+      "name": "repeated_attribute_first_wins",
+      "html": "<a href=\"https://x.test/1\" href=\"https://x.test/2\">go</a>",
+      "balanced": "<a href=\"https://x.test/1\">go</a>",
+      "canonical": "\u001ehttps://x.test/1\u001fgo",
+      "content_sha256": "nfSCltrSYw0HByoU-p8dH9SvfQbJm2vyyppJUow3444",
+      "first_violation": null
+    },
+    {
+      "name": "skipped_elements",
+      "html": "<head><title>t</title></head><style>p{}</style><!-- c --><script>x()</script><p>Hi</p>",
+      "balanced": "<style>p{}</style><!-- c --><p>Hi</p>",
+      "canonical": "Hi",
+      "content_sha256": "NjnvzQirsnOxYZ6C54wpp98CwQUbGCDpn8OV3KozJrg",
+      "first_violation": "inside:style"
+    },
+    {
+      "name": "control_characters",
+      "html": "<p>A\u0000B\u0007CD</p>",
+      "balanced": "<p>AB\u0007CD</p>",
+      "canonical": "ABCD",
+      "content_sha256": "4S4RWs9FUrJWi1XpPL05OUxO-ByCRH-vyZeIKgLSNnc",
+      "first_violation": null
+    },
+    {
+      "name": "url_trim_and_inner_whitespace",
+      "html": "<a href=\"\u0001 https://x.test/a\tb\nc d\r \">x</a>",
+      "balanced": "<a href=\"\u0001 https://x.test/a\tb\nc d\n \">x</a>",
+      "canonical": "\u001ehttps://x.test/abc d\u001fx",
+      "content_sha256": "gFrV6aeSaTlc0UQggp8CnTd3LRUhe8BRi-zcwpRE6pE",
+      "first_violation": null
+    },
+    {
+      "name": "url_control_percent_encoded",
+      "html": "<a href=\"https://x.test/a\u0007bc\u001f\">x</a>",
+      "balanced": "<a href=\"https://x.test/a\u0007bc\u001f\">x</a>",
+      "canonical": "\u001ehttps://x.test/a%07b%7Fc\u001fx",
+      "content_sha256": "Z4PauU2RYgQkA1gBpJ-Fw6bdkCIV6PfIuKxxnXpEO6I",
+      "first_violation": null
+    },
+    {
+      "name": "url_no_case_fold_no_decode",
+      "html": "<a href=\"HTTPS://X.Test/%7euser/%41\">x</a>",
+      "balanced": "<a href=\"HTTPS://X.Test/%7euser/%41\">x</a>",
+      "canonical": "\u001eHTTPS://X.Test/%7euser/%41\u001fx",
+      "content_sha256": "KsvEA4KkehSBOnE3kHLivY76lqAThJlD3E3BmueclNQ",
+      "first_violation": null
+    },
+    {
+      "name": "safelinks_first_url_parameter",
+      "html": "<a href=\"https://eur01.safelinks.protection.outlook.com/?data=1&amp;url=https%3A%2F%2Ffirst.test%2F&amp;url=https%3A%2F%2Fsecond.test%2F\">x</a>",
+      "balanced": "<a href=\"https://eur01.safelinks.protection.outlook.com/?data=1&amp;url=https%3A%2F%2Ffirst.test%2F&amp;url=https%3A%2F%2Fsecond.test%2F\">x</a>",
+      "canonical": "\u001ehttps://first.test/\u001fx",
+      "content_sha256": "F3bvs9Mssm8fARClaYtK8m7JbaKj9flXi5c1Ytc3h_M",
+      "first_violation": null
+    },
+    {
+      "name": "safelinks_plus_and_blank_value",
+      "html": "<a href=\"https://eur01.safelinks.protection.outlook.com/?url=https%3A%2F%2Fx.test%2Fa+b%20c&amp;e=\">x</a>",
+      "balanced": "<a href=\"https://eur01.safelinks.protection.outlook.com/?url=https%3A%2F%2Fx.test%2Fa+b%20c&amp;e=\">x</a>",
+      "canonical": "\u001ehttps://x.test/a b c\u001fx",
+      "content_sha256": "h_3yQ0uHk-oaAWBB4b9lWY-3R5bYAOV9XToXg6WYdLE",
+      "first_violation": null
+    },
+    {
+      "name": "safelinks_no_url_parameter",
+      "html": "<a href=\"https://eur01.safelinks.protection.outlook.com/?data=1\">x</a>",
+      "balanced": "<a href=\"https://eur01.safelinks.protection.outlook.com/?data=1\">x</a>",
+      "canonical": "\u001ehttps://eur01.safelinks.protection.outlook.com/?data=1\u001fx",
+      "content_sha256": "Td8opcLzb7jV2fwa9eKAgIjwhO5ivpf_QmkYmJZIk18",
+      "first_violation": null
+    },
+    {
+      "name": "safelinks_fragment_hides_parameter",
+      "html": "<a href=\"https://eur01.safelinks.protection.outlook.com/#?url=https%3A%2F%2Fx.test\">x</a>",
+      "balanced": "<a href=\"https://eur01.safelinks.protection.outlook.com/#?url=https%3A%2F%2Fx.test\">x</a>",
+      "canonical": "\u001ehttps://eur01.safelinks.protection.outlook.com/#?url=https%3A%2F%2Fx.test\u001fx",
+      "content_sha256": "yPpMiuTFLtHfP6lSPnb1OmQNQxYgKkg6phmRkt4SKD8",
+      "first_violation": null
+    },
+    {
+      "name": "safelinks_userinfo_is_not_unwrapped",
+      "html": "<a href=\"https://evil.test@eur01.safelinks.protection.outlook.com/?url=https%3A%2F%2Fx.test\">x</a>",
+      "balanced": "<a href=\"https://evil.test@eur01.safelinks.protection.outlook.com/?url=https%3A%2F%2Fx.test\">x</a>",
+      "canonical": "\u001ehttps://evil.test@eur01.safelinks.protection.outlook.com/?url=https%3A%2F%2Fx.test\u001fx",
+      "content_sha256": "fEp-gbOSdgyIQRaPQfVM2u8aoxzoSuv3ml5AD5R_YII",
+      "first_violation": null
+    },
+    {
+      "name": "safelinks_target_is_trimmed",
+      "html": "<a href=\"https://eur01.safelinks.protection.outlook.com/?url=%20https%3A%2F%2Fx.test%2Fa%0A\">x</a>",
+      "balanced": "<a href=\"https://eur01.safelinks.protection.outlook.com/?url=%20https%3A%2F%2Fx.test%2Fa%0A\">x</a>",
+      "canonical": "\u001ehttps://x.test/a\u001fx",
+      "content_sha256": "sv1jYsv-2XIr8HkLYTTdgxEKnAQ21aKdXx3mOSxbDSc",
+      "first_violation": null
+    },
+    {
+      "name": "url_empty_after_trim",
+      "html": "<a href=\"  \">x</a><img src=\"\">y",
+      "balanced": "<a href=\"  \">x</a><img src=\"\">y",
+      "canonical": "xy",
+      "content_sha256": "dppObQADGJx-lsXZt-gQoNEcOhKDJSfslLD4bSd_Uco",
+      "first_violation": "inside:a[href]"
+    },
+    {
+      "name": "misplaced_head_and_stray_tags",
+      "html": "<p>one</p><head><title>t</title><base href='https://x.test/'></head></b></p>two",
+      "balanced": "<p>one</p><title>t</title><base href=\"https://x.test/\"><p></p>two",
+      "canonical": "onetwo",
+      "content_sha256": "JbZ0bVFy7WNSlmoBPZOshG4RENWiXo8YO1kx9GiIQqE",
+      "first_violation": "inside:title"
+    },
+    {
+      "name": "link_title_and_image_alt",
+      "html": "<p>See <a href=\"https://x.test/a\" title=\"Clause 4 (b)\">the clause</a> <img src=\"https://x.test/c.png\" alt=\"Chart: Q3 é\"> now</p>",
+      "balanced": "<p>See <a href=\"https://x.test/a\" title=\"Clause 4 (b)\">the clause</a> <img src=\"https://x.test/c.png\" alt=\"Chart: Q3 é\"> now</p>",
+      "canonical": "See\u001ehttps://x.test/a\u001f\u001dClause4(b)\u001ftheclause\u001ehttps://x.test/c.png\u001f\u001dChart:Q3é\u001fnow",
+      "content_sha256": "4qns4S5n6OELtiqoK4soSoA7FGUdsnV5J_FGfBDkUs0",
+      "first_violation": null
+    },
+    {
+      "name": "alt_changes_digest_a",
+      "html": "<img src=\"https://x.test/c.png\" alt=\"Pay USD 1.00\">",
+      "balanced": "<img src=\"https://x.test/c.png\" alt=\"Pay USD 1.00\">",
+      "canonical": "\u001ehttps://x.test/c.png\u001f\u001dPayUSD1.00\u001f",
+      "content_sha256": "sRbwhlq9TrvBq26nzWdSUXQpNKGcAM5-CIphAmSspCs",
+      "first_violation": null
+    },
+    {
+      "name": "alt_changes_digest_b",
+      "html": "<img src=\"https://x.test/c.png\" alt=\"Pay USD 9.00\">",
+      "balanced": "<img src=\"https://x.test/c.png\" alt=\"Pay USD 9.00\">",
+      "canonical": "\u001ehttps://x.test/c.png\u001f\u001dPayUSD9.00\u001f",
+      "content_sha256": "TJwdlr3fn2RV1CNlZEB6A7TXRpMeVKxrrYZ7bvYYQSI",
+      "first_violation": null
+    },
+    {
+      "name": "alt_normalised_like_text",
+      "html": "<img src=\"https://x.test/c.png\" alt=\"Café   a\u0007b\n\">",
+      "balanced": "<img src=\"https://x.test/c.png\" alt=\"Café   a\u0007b\n\">",
+      "canonical": "\u001ehttps://x.test/c.png\u001f\u001dCaféab\u001f",
+      "content_sha256": "49xpNYJZ8MjQgvtx9C5Kf6-8Q6-auHNmATYPH_haVYI",
+      "first_violation": null
+    },
+    {
+      "name": "alt_empty_after_normalisation_does_not_split_the_run",
+      "html": "<p>a<img src=\"https://x.test/c.png\" alt=\"  \t \"> b<a href=\"https://x.test/\" title=\"\">c</a></p>",
+      "balanced": "<p>a<img src=\"https://x.test/c.png\" alt=\"  \t \"> b<a href=\"https://x.test/\" title=\"\">c</a></p>",
+      "canonical": "a\u001ehttps://x.test/c.png\u001fb\u001ehttps://x.test/\u001fc",
+      "content_sha256": "WLBz00nwhrSGnUK8IeaJyYqnSHFWbctrmol8fUSWvnI",
+      "first_violation": null
+    },
+    {
+      "name": "title_without_href_digested",
+      "html": "<a title=\"Only a title\">text</a>",
+      "balanced": "<a title=\"Only a title\">text</a>",
+      "canonical": "\u001dOnlyatitle\u001ftext",
+      "content_sha256": "yk0Lzm7jFexFlVaqG5pMj3jV92DVPphbF2UsKOOkdGs",
+      "first_violation": null
+    },
+    {
+      "name": "image_without_alt",
+      "html": "<img src=\"https://x.test/c.png\">",
+      "balanced": "<img src=\"https://x.test/c.png\">",
+      "canonical": "\u001ehttps://x.test/c.png\u001f",
+      "content_sha256": "t6lCkbfCuXx6jFkzbLDsG8lr_KkFbDWZk3JXzsoppL0",
+      "first_violation": null
+    },
+    {
+      "name": "image_cid_source_and_alt",
+      "html": "<p>Logo <img src=\"cid:logo123@x\" alt=\"Logo\"></p>",
+      "balanced": "<p>Logo <img src=\"cid:logo123@x\" alt=\"Logo\"></p>",
+      "canonical": "Logo\u001ecid:logo123@x\u001f\u001dLogo\u001f",
+      "content_sha256": "guObAKM7yHMDvOOe8-S_gf6TMEiP3O7q-b6n18KTpxM",
+      "first_violation": "inside:img[src]"
+    },
+    {
+      "name": "image_size_not_digested",
+      "html": "<img src=\"https://x.test/c.png\" alt=\"c\" width=\"10\" height=\"50%\" style=\"x\">",
+      "balanced": "<img src=\"https://x.test/c.png\" alt=\"c\" width=\"10\" height=\"50%\" style=\"x\">",
+      "canonical": "\u001ehttps://x.test/c.png\u001f\u001dc\u001f",
+      "content_sha256": "0totWZyiwkNLXiLd18N_L92Ka31xv_X_51iGjc4pK6w",
+      "first_violation": "inside:img[width]"
+    },
+    {
+      "name": "dir_not_digested",
+      "html": "<p dir=\"rtl\">one</p><span dir=rtl>two</span><div dir=\"ltr\" lang=\"it\">three</div>",
+      "balanced": "<p dir=\"rtl\">one</p><span dir=\"rtl\">two</span><div dir=\"ltr\" lang=\"it\">three</div>",
+      "canonical": "onetwothree",
+      "content_sha256": "RZIJLhBhx-qFryrtGUYhzBeidiuuM6eb-M4z_QFouAE",
+      "first_violation": "inside:p[dir]"
+    },
+    {
+      "name": "ol_start_and_type_not_digested",
+      "html": "<ol start=\"5\" type=\"a\" dir=\"ltr\"><li>one</li><li>two</li></ol>",
+      "balanced": "<ol start=\"5\" type=\"a\" dir=\"ltr\"><li>one</li><li>two</li></ol>",
+      "canonical": "onetwo",
+      "content_sha256": "JbZ0bVFy7WNSlmoBPZOshG4RENWiXo8YO1kx9GiIQqE",
+      "first_violation": "inside:ol[start]"
+    },
+    {
+      "name": "style_attribute_and_class_not_digested",
+      "html": "<p style=\"color:red;background:url(https://x.test/a.png)\" class=\"c\" id=\"i\">Pay <span style=\"x\" data-k=\"v\" onclick=\"f()\">now</span></p>",
+      "balanced": "<p style=\"color:red;background:url(https://x.test/a.png)\" class=\"c\" id=\"i\">Pay <span style=\"x\" data-k=\"v\" onclick=\"f()\">now</span></p>",
+      "canonical": "Paynow",
+      "content_sha256": "NApQj9MUTX-DEm8Dac548KOMODEKTOVg9duzXeeiQHQ",
+      "first_violation": "inside:p[style]"
+    },
+    {
+      "name": "style_text_not_digested_unclosed_style_closed",
+      "html": "<style>p{background:url(https://x.test/d.png)}</style><p>Hi</p><style>unclosed<p>gone",
+      "balanced": "<style>p{background:url(https://x.test/d.png)}</style><p>Hi</p><style>unclosed<p>gone</style>",
+      "canonical": "Hi",
+      "content_sha256": "NjnvzQirsnOxYZ6C54wpp98CwQUbGCDpn8OV3KozJrg",
+      "first_violation": "inside:style"
+    },
+    {
+      "name": "comment_not_digested",
+      "html": "<p>a<!-- hidden https://x.test/ -->b</p><!-- tail -->c",
+      "balanced": "<p>a<!-- hidden https://x.test/ -->b</p><!-- tail -->c",
+      "canonical": "abc",
+      "content_sha256": "ungWv48Bz-pBQUDeXa4iI7ADYaOWF3qctBD_YfIAFa0",
+      "first_violation": "inside:#comment"
+    },
+    {
+      "name": "conditional_comment_not_digested",
+      "html": "<p>a</p><!--[if mso]><p>Outlook only</p><![endif]--><p>b</p>",
+      "balanced": "<p>a</p><!--[if mso]><p>Outlook only</p><![endif]--><p>b</p>",
+      "canonical": "ab",
+      "content_sha256": "-44g_C5MPySMYMOb1lLzwTRymLuXe4tNWQO4UFViBgM",
+      "first_violation": "inside:#comment"
+    },
+    {
+      "name": "unclosed_comment_swallows_the_rest",
+      "html": "<p>a</p><!-- <p>b</p>",
+      "balanced": "<p>a</p><!-- <p>b</p>-->",
+      "canonical": "a",
+      "content_sha256": "ypeBEsobvcr6wjGzmiPcTaeG7_gUfE5yuYB3ha_uSLs",
+      "first_violation": "inside:#comment"
+    },
+    {
+      "name": "bad_scheme_href_digested_with_its_text",
+      "html": "<p><a href=\"javascript:alert(1)\">click</a> <a href=\"data:text/html,x\">data</a> <a href=\"/relative\">rel</a> <a href=\"//host.test/p\">net</a> <a href=\"  JaVa\nScript:x\">mixed</a></p>",
+      "balanced": "<p><a href=\"javascript:alert(1)\">click</a> <a href=\"data:text/html,x\">data</a> <a href=\"/relative\">rel</a> <a href=\"//host.test/p\">net</a> <a href=\"  JaVa\nScript:x\">mixed</a></p>",
+      "canonical": "\u001ejavascript:alert(1)\u001fclick\u001edata:text/html,x\u001fdata\u001e/relative\u001frel\u001e//host.test/p\u001fnet\u001eJaVaScript:x\u001fmixed",
+      "content_sha256": "o82hYDhClmxDhTi0ZX0BZlNHityxTdOUkKXh5wDBh1Y",
+      "first_violation": "inside:a[href]"
+    },
+    {
+      "name": "bad_scheme_href_digested_with_its_title",
+      "html": "<a href=\"javascript:x\" title=\"Beware\">link</a>",
+      "balanced": "<a href=\"javascript:x\" title=\"Beware\">link</a>",
+      "canonical": "\u001ejavascript:x\u001f\u001dBeware\u001flink",
+      "content_sha256": "jxKRAXaki09z8b3Txu0l2C8FMUQv8nOp2ONt4Fh-beE",
+      "first_violation": "inside:a[href]"
+    },
+    {
+      "name": "allowed_schemes_a",
+      "html": "<a href=\"HTTP://x.test/\">h</a><a href=\"mailto:a@x.test\">m</a><a href=\"tel:+3912345\">t</a><a href=\"HtTpS://x.test/s\">s</a>",
+      "balanced": "<a href=\"HTTP://x.test/\">h</a><a href=\"mailto:a@x.test\">m</a><a href=\"tel:+3912345\">t</a><a href=\"HtTpS://x.test/s\">s</a>",
+      "canonical": "\u001eHTTP://x.test/\u001fh\u001emailto:a@x.test\u001fm\u001etel:+3912345\u001ft\u001eHtTpS://x.test/s\u001fs",
+      "content_sha256": "FWtQp1fUjqCpxDIC-E9xDJ7mM_k30KH7D_ZjXd5pwkI",
+      "first_violation": null
+    },
+    {
+      "name": "image_source_any_scheme_digested",
+      "html": "<img src=\"http://x.test/a.png\" alt=\"insecure\"><img src=\"cid:c@x\" alt=\"cid\"><img src=\"data:image/png;base64,AA\" alt=\"d\"><img src=\"/a.png\" alt=\"rel\"><img src=\"https://x.test/ok.png\" alt=\"ok\">",
+      "balanced": "<img src=\"http://x.test/a.png\" alt=\"insecure\"><img src=\"cid:c@x\" alt=\"cid\"><img src=\"data:image/png;base64,AA\" alt=\"d\"><img src=\"/a.png\" alt=\"rel\"><img src=\"https://x.test/ok.png\" alt=\"ok\">",
+      "canonical": "\u001ehttp://x.test/a.png\u001f\u001dinsecure\u001f\u001ecid:c@x\u001f\u001dcid\u001f\u001edata:image/png;base64,AA\u001f\u001dd\u001f\u001e/a.png\u001f\u001drel\u001f\u001ehttps://x.test/ok.png\u001f\u001dok\u001f",
+      "content_sha256": "uwNxQjS7B206ALRfzBu5JkKH6IpPhZ6ZJtpSdLUXcrg",
+      "first_violation": "inside:img[src]"
+    },
+    {
+      "name": "safelinks_bad_target_scheme",
+      "html": "<a href=\"https://eur01.safelinks.protection.outlook.com/?url=javascript%3Aalert(1)\">x</a>",
+      "balanced": "<a href=\"https://eur01.safelinks.protection.outlook.com/?url=javascript%3Aalert(1)\">x</a>",
+      "canonical": "\u001ejavascript:alert(1)\u001fx",
+      "content_sha256": "2JJ_zBzwQHUkEfbogESjQ9rQsq2g7MOHyp7ds1liV4Q",
+      "first_violation": "inside:a[href]"
+    },
+    {
+      "name": "safelinks_mailto_target_on_an_image",
+      "html": "<img src=\"https://eur01.safelinks.protection.outlook.com/?url=mailto%3Aa%40x.test\" alt=\"m\">",
+      "balanced": "<img src=\"https://eur01.safelinks.protection.outlook.com/?url=mailto%3Aa%40x.test\" alt=\"m\">",
+      "canonical": "\u001emailto:a@x.test\u001f\u001dm\u001f",
+      "content_sha256": "2rhGIvnQgKs_ZSd0wM4_yVQYyvETk-Dh45DSOmJez0E",
+      "first_violation": "inside:img[src]"
+    },
+    {
+      "name": "unknown_wrappers_kept",
+      "html": "<center><font color=red>Pay <o:p></o:p>now</font></center><font><a href=\"https://x.test/\">kept</a></font>",
+      "balanced": "<center><font color=\"red\">Pay <o:p></o:p>now</font></center><font><a href=\"https://x.test/\">kept</a></font>",
+      "canonical": "Paynow\u001ehttps://x.test/\u001fkept",
+      "content_sha256": "WxQJ-9E3sjlM11dvwemta8GJtOpSrkaW2Kox8XkCHnM",
+      "first_violation": "inside:center"
+    },
+    {
+      "name": "script_iframe_template_text_not_digested",
+      "html": "<p>a</p><script>x()</script><iframe src='https://x.test/f'>f</iframe><object data='o'>o</object><embed src='e'><noscript>n</noscript><template><p>t</p></template><p>b</p>",
+      "balanced": "<p>a</p><script>x()</script><iframe src=\"https://x.test/f\">f</iframe><object data=\"o\">o</object><embed src=\"e\"><noscript>n</noscript><template><p>t</p></template><p>b</p>",
+      "canonical": "aonb",
+      "content_sha256": "O0Gm2wgV8sFqNakXEHBBNb5KBlVyHt5xYF9cexnxULY",
+      "first_violation": "inside:script"
+    },
+    {
+      "name": "svg_and_math_text_digested",
+      "html": "<p>a</p><svg><a href=\"https://x.test/1\">l</a><text>shown?</text></svg><math><mi>x</mi></math><p>b</p>",
+      "balanced": "<p>a</p><svg><a href=\"https://x.test/1\">l</a><text>shown?</text></svg><math><mi>x</mi></math><p>b</p>",
+      "canonical": "alshown?xb",
+      "content_sha256": "vSWo7RNoqQ2gk21ZLCxxapvBjaM3g5uPdO_0hzZioQw",
+      "first_violation": "inside:svg"
+    },
+    {
+      "name": "form_and_media_text_digested",
+      "html": "<form><input value=\"v\"><select><option>o</option></select><button>b</button></form><video src=\"v.mp4\">v</video><audio src=\"a.mp3\">a</audio><p>c</p>",
+      "balanced": "<form><input value=\"v\"><select><option>o</option></select><button>b</button></form><video src=\"v.mp4\">v</video><audio src=\"a.mp3\">a</audio><p>c</p>",
+      "canonical": "obvac",
+      "content_sha256": "ngddu9ghpSbWI3LV-gEumR-BF0sLcCpAK_VBqcYaNDA",
+      "first_violation": "inside:form"
+    },
+    {
+      "name": "textarea_and_xmp_text_digested",
+      "html": "<p>a</p><textarea>Pay <b>x</b></textarea><xmp>1 < 2 <i>y</i></xmp><p>b</p>",
+      "balanced": "<p>a</p><textarea>Pay &lt;b&gt;x&lt;/b&gt;</textarea><xmp>1 < 2 <i>y</i></xmp><p>b</p>",
+      "canonical": "aPay<b>x</b>1<2<i>y</i>b",
+      "content_sha256": "twnilbrtZ7l-paCNpnmGIRfDBdLCiqqC_XxADyndv84",
+      "first_violation": "inside:textarea"
+    },
+    {
+      "name": "plaintext_swallows_the_rest_as_text",
+      "html": "<p>a</p><plaintext><b>b</b> <a href='https://x.test/'>c</a>",
+      "balanced": "<p>a</p><pre>&lt;b&gt;b&lt;/b&gt; &lt;a href='https://x.test/'&gt;c&lt;/a&gt;</pre>",
+      "canonical": "a<b>b</b><ahref='https://x.test/'>c</a>",
+      "content_sha256": "4eh5s7PhPQUyt7e0Z26A4lbTB8Xc971BPXwmF-i3cQw",
+      "first_violation": null
+    },
+    {
+      "name": "table_attributes_not_digested",
+      "html": "<table background=\"t.png\" style=\"x\"><tr><td background=\"td.png\" colspan=\"2\">a</td><td>b</td></tr></table>",
+      "balanced": "<table background=\"t.png\" style=\"x\"><tbody><tr><td background=\"td.png\" colspan=\"2\">a</td><td>b</td></tr></tbody></table>",
+      "canonical": "ab",
+      "content_sha256": "-44g_C5MPySMYMOb1lLzwTRymLuXe4tNWQO4UFViBgM",
+      "first_violation": "inside:table[background]"
+    },
+    {
+      "name": "foster_parented_text_stays_in_front_of_the_table",
+      "html": "<p>a</p><table>stray<tr><td>cell</td></tr></table>",
+      "balanced": "<p>a</p>stray<table><tbody><tr><td>cell</td></tr></tbody></table>",
+      "canonical": "astraycell",
+      "content_sha256": "AZniAPlpK1K5mFx9_h33sDkER7vSONUm-Yg9QEZtIdA",
+      "first_violation": null
+    },
+    {
+      "name": "whole_document_carries_head_style_and_body",
+      "html": "<html><head><title>t</title><style>p{}</style><meta charset=utf-8></head><body onload=\"x()\" bgcolor=\"red\"><p>one</p></body></html>",
+      "balanced": "<style>p{}</style><p>one</p>",
+      "canonical": "one",
+      "content_sha256": "dpLDrTVAu4A8Ags67mbNiIcSMjTqDG5xQ8Ct1z_0Me0",
+      "first_violation": "inside:style"
+    },
+    {
+      "name": "unclosed_elements",
+      "html": "<div><p>one<b>two<table><tr><td>three",
+      "balanced": "<div><p>one<b>two<table><tbody><tr><td>three</td></tr></tbody></table></b></p></div>",
+      "canonical": "onetwothree",
+      "content_sha256": "RZIJLhBhx-qFryrtGUYhzBeidiuuM6eb-M4z_QFouAE",
+      "first_violation": null
+    },
+    {
+      "name": "character_references",
+      "html": "<p>a&amp;b &lt;c&gt; &#x41; &eacute; &nbsp;d</p>",
+      "balanced": "<p>a&amp;b &lt;c&gt; A é  d</p>",
+      "canonical": "a&b<c>Aéd",
+      "content_sha256": "AemvcKU2JihvQ2AlwvopcKz_Evm4TWpLWDc6xLlo-zs",
+      "first_violation": null
+    },
+    {
+      "name": "nfc_normalisation",
+      "html": "<p>Café Café</p>",
+      "balanced": "<p>Café Café</p>",
+      "canonical": "CaféCafé",
+      "content_sha256": "qzEQAIjdtLFGRMhamWWRtKxqOdjINlGFiimluZciOy4",
+      "first_violation": null
+    },
+    {
+      "name": "whitespace_set",
+      "html": "<p>a b c　d﻿ef g⁠h</p>",
+      "balanced": "<p>a b c　d﻿ef g⁠h</p>",
+      "canonical": "abcdefgh",
+      "content_sha256": "nFbMUbN0w7oYkhDVttS_V3kNNRyWxHwCGQ7PHkMGNas",
+      "first_violation": null
+    },
+    {
+      "name": "link_text_around_urls",
+      "html": "<p>a <a href=\"https://x.test/\">b</a> c</p>",
+      "balanced": "<p>a <a href=\"https://x.test/\">b</a> c</p>",
+      "canonical": "a\u001ehttps://x.test/\u001fbc",
+      "content_sha256": "4b33rbE44E7UQqgMKJkH1f8MezYnFh4YXECDTk2ujKU",
+      "first_violation": null
+    }
+  ],
+  "label": [
+    {
+      "name": "plain",
+      "input": {
+        "text": "Please confirm laytime.\nThanks  & regards <A>",
+        "entity": "Example Shipping Ltd",
+        "mid": "20b56aa04ec84500bf52f6e0c683d1f2",
+        "iat": 1794238106
+      },
+      "expected": {
+        "canonical": "Pleaseconfirmlaytime.Thanks&regards<A>ThisemailwasgeneratedbyanAIsystem(ComplexioEnterpriseAutomator)onbehalfofExampleShippingLtd.Pleaseverifybeforetakingaction.",
+        "content_sha256": "DTuVv_TVvzErDaAHdBwZRxiZp4IqbhFxL-fPzfwidT0",
+        "token": "eyJhbGciOiJub25lIiwidHlwIjoiYWktZGlzY2xvc3VyZStqd3QifQ.eyJhaV9nZW5lcmF0ZWQiOnRydWUsImNhbm9uIjoidGV4dC1saW5rcy8xIiwiY29udGVudF9zaGEyNTYiOiJEVHVWdl9UVnZ6RXJEYUFIZEJ3WlJ4aVpwNElxYmhGeEwtZlB6ZndpZFQwIiwiZ2VuZXJhdG9yIjoiQ29tcGxleGlvIEVudGVycHJpc2UgQXV0b21hdG9yIiwiaWF0IjoxNzk0MjM4MTA2LCJtaWQiOiIyMGI1NmFhMDRlYzg0NTAwYmY1MmY2ZTBjNjgzZDFmMiIsIm9uX2JlaGFsZl9vZiI6IkV4YW1wbGUgU2hpcHBpbmcgTHRkIiwic3BlYyI6ImNvbXBsZXhpby1haS1kaXNjbG9zdXJlLzEifQ.",
+        "html_body": "<div data-ai-content=\"20b56aa04ec84500bf52f6e0c683d1f2\"><div>Please confirm laytime.<br>Thanks  &amp; regards &lt;A&gt;</div><p><small><em>This email was generated by an AI system (Complexio Enterprise Automator) on behalf of Example Shipping Ltd. Please verify before taking action.</em></small></p></div><div data-ai-disclosure=\"eyJhbGciOiJub25lIiwidHlwIjoiYWktZGlzY2xvc3VyZStqd3QifQ.eyJhaV9nZW5lcmF0ZWQiOnRydWUsImNhbm9uIjoidGV4dC1saW5rcy8xIiwiY29udGVudF9zaGEyNTYiOiJEVHVWdl9UVnZ6RXJEYUFIZEJ3WlJ4aVpwNElxYmhGeEwtZlB6ZndpZFQwIiwiZ2VuZXJhdG9yIjoiQ29tcGxleGlvIEVudGVycHJpc2UgQXV0b21hdG9yIiwiaWF0IjoxNzk0MjM4MTA2LCJtaWQiOiIyMGI1NmFhMDRlYzg0NTAwYmY1MmY2ZTBjNjgzZDFmMiIsIm9uX2JlaGFsZl9vZiI6IkV4YW1wbGUgU2hpcHBpbmcgTHRkIiwic3BlYyI6ImNvbXBsZXhpby1haS1kaXNjbG9zdXJlLzEifQ.\" style=\"display:none\" aria-hidden=\"true\"></div>"
+      }
+    },
+    {
+      "name": "amounts_and_addresses",
+      "input": {
+        "text": "Pay USD 1.00 to a.b@example.test by 12:30.",
+        "entity": "the company",
+        "mid": "00000000000000000000000000000001",
+        "iat": 1794238107
+      },
+      "expected": {
+        "canonical": "PayUSD1.00toa.b@example.testby12:30.ThisemailwasgeneratedbyanAIsystem(ComplexioEnterpriseAutomator)onbehalfofthecompany.Pleaseverifybeforetakingaction.",
+        "content_sha256": "HI4OlWrQbps8ljM7Rz0YyEQeV8YW3rTpbkL57g_-JFY",
+        "token": "eyJhbGciOiJub25lIiwidHlwIjoiYWktZGlzY2xvc3VyZStqd3QifQ.eyJhaV9nZW5lcmF0ZWQiOnRydWUsImNhbm9uIjoidGV4dC1saW5rcy8xIiwiY29udGVudF9zaGEyNTYiOiJISTRPbFdyUWJwczhsak03UnowWXlFUWVWOFlXM3JUcGJrTDU3Z18tSkZZIiwiZ2VuZXJhdG9yIjoiQ29tcGxleGlvIEVudGVycHJpc2UgQXV0b21hdG9yIiwiaWF0IjoxNzk0MjM4MTA3LCJtaWQiOiIwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMSIsIm9uX2JlaGFsZl9vZiI6InRoZSBjb21wYW55Iiwic3BlYyI6ImNvbXBsZXhpby1haS1kaXNjbG9zdXJlLzEifQ.",
+        "html_body": "<div data-ai-content=\"00000000000000000000000000000001\"><div>Pay USD 1.00 to a.b@example.test by 12:30.</div><p><small><em>This email was generated by an AI system (Complexio Enterprise Automator) on behalf of the company. Please verify before taking action.</em></small></p></div><div data-ai-disclosure=\"eyJhbGciOiJub25lIiwidHlwIjoiYWktZGlzY2xvc3VyZStqd3QifQ.eyJhaV9nZW5lcmF0ZWQiOnRydWUsImNhbm9uIjoidGV4dC1saW5rcy8xIiwiY29udGVudF9zaGEyNTYiOiJISTRPbFdyUWJwczhsak03UnowWXlFUWVWOFlXM3JUcGJrTDU3Z18tSkZZIiwiZ2VuZXJhdG9yIjoiQ29tcGxleGlvIEVudGVycHJpc2UgQXV0b21hdG9yIiwiaWF0IjoxNzk0MjM4MTA3LCJtaWQiOiIwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMSIsIm9uX2JlaGFsZl9vZiI6InRoZSBjb21wYW55Iiwic3BlYyI6ImNvbXBsZXhpby1haS1kaXNjbG9zdXJlLzEifQ.\" style=\"display:none\" aria-hidden=\"true\"></div>"
+      }
+    },
+    {
+      "name": "unicode_and_entity_escaping",
+      "input": {
+        "text": "Café — “quoted” text\r\nline two",
+        "entity": "Smith & \"Sons\" <Ltd>",
+        "mid": "ffffffffffffffffffffffffffffffff",
+        "iat": 1794238108
+      },
+      "expected": {
+        "canonical": "Café—“quoted”textlinetwoThisemailwasgeneratedbyanAIsystem(ComplexioEnterpriseAutomator)onbehalfofSmith&\"Sons\"<Ltd>.Pleaseverifybeforetakingaction.",
+        "content_sha256": "R-vyW5zxcurrGl0KjYV5hWXj8yyiN2khftVT8EwNWcE",
+        "token": "eyJhbGciOiJub25lIiwidHlwIjoiYWktZGlzY2xvc3VyZStqd3QifQ.eyJhaV9nZW5lcmF0ZWQiOnRydWUsImNhbm9uIjoidGV4dC1saW5rcy8xIiwiY29udGVudF9zaGEyNTYiOiJSLXZ5VzV6eGN1cnJHbDBLallWNWhXWGo4eXlpTjJraGZ0VlQ4RXdOV2NFIiwiZ2VuZXJhdG9yIjoiQ29tcGxleGlvIEVudGVycHJpc2UgQXV0b21hdG9yIiwiaWF0IjoxNzk0MjM4MTA4LCJtaWQiOiJmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZiIsIm9uX2JlaGFsZl9vZiI6IlNtaXRoICYgXCJTb25zXCIgPEx0ZD4iLCJzcGVjIjoiY29tcGxleGlvLWFpLWRpc2Nsb3N1cmUvMSJ9.",
+        "html_body": "<div data-ai-content=\"ffffffffffffffffffffffffffffffff\"><div>Café — “quoted” text<br>line two</div><p><small><em>This email was generated by an AI system (Complexio Enterprise Automator) on behalf of Smith &amp; \"Sons\" &lt;Ltd&gt;. Please verify before taking action.</em></small></p></div><div data-ai-disclosure=\"eyJhbGciOiJub25lIiwidHlwIjoiYWktZGlzY2xvc3VyZStqd3QifQ.eyJhaV9nZW5lcmF0ZWQiOnRydWUsImNhbm9uIjoidGV4dC1saW5rcy8xIiwiY29udGVudF9zaGEyNTYiOiJSLXZ5VzV6eGN1cnJHbDBLallWNWhXWGo4eXlpTjJraGZ0VlQ4RXdOV2NFIiwiZ2VuZXJhdG9yIjoiQ29tcGxleGlvIEVudGVycHJpc2UgQXV0b21hdG9yIiwiaWF0IjoxNzk0MjM4MTA4LCJtaWQiOiJmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZiIsIm9uX2JlaGFsZl9vZiI6IlNtaXRoICYgXCJTb25zXCIgPEx0ZD4iLCJzcGVjIjoiY29tcGxleGlvLWFpLWRpc2Nsb3N1cmUvMSJ9.\" style=\"display:none\" aria-hidden=\"true\"></div>"
+      }
+    },
+    {
+      "name": "nul_and_controls",
+      "input": {
+        "text": "a\u0000b\u0007c\r\rd",
+        "entity": "the company",
+        "mid": "0123456789abcdef0123456789abcdef",
+        "iat": 1794238109
+      },
+      "expected": {
+        "canonical": "abcdThisemailwasgeneratedbyanAIsystem(ComplexioEnterpriseAutomator)onbehalfofthecompany.Pleaseverifybeforetakingaction.",
+        "content_sha256": "dhUBNdxGFTXL8FhYrD02TNVEY4nqjOauBLivepJdv2k",
+        "token": "eyJhbGciOiJub25lIiwidHlwIjoiYWktZGlzY2xvc3VyZStqd3QifQ.eyJhaV9nZW5lcmF0ZWQiOnRydWUsImNhbm9uIjoidGV4dC1saW5rcy8xIiwiY29udGVudF9zaGEyNTYiOiJkaFVCTmR4R0ZUWEw4RmhZckQwMlROVkVZNG5xak9hdUJMaXZlcEpkdjJrIiwiZ2VuZXJhdG9yIjoiQ29tcGxleGlvIEVudGVycHJpc2UgQXV0b21hdG9yIiwiaWF0IjoxNzk0MjM4MTA5LCJtaWQiOiIwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsIm9uX2JlaGFsZl9vZiI6InRoZSBjb21wYW55Iiwic3BlYyI6ImNvbXBsZXhpby1haS1kaXNjbG9zdXJlLzEifQ.",
+        "html_body": "<div data-ai-content=\"0123456789abcdef0123456789abcdef\"><div>ab\u0007c<br><br>d</div><p><small><em>This email was generated by an AI system (Complexio Enterprise Automator) on behalf of the company. Please verify before taking action.</em></small></p></div><div data-ai-disclosure=\"eyJhbGciOiJub25lIiwidHlwIjoiYWktZGlzY2xvc3VyZStqd3QifQ.eyJhaV9nZW5lcmF0ZWQiOnRydWUsImNhbm9uIjoidGV4dC1saW5rcy8xIiwiY29udGVudF9zaGEyNTYiOiJkaFVCTmR4R0ZUWEw4RmhZckQwMlROVkVZNG5xak9hdUJMaXZlcEpkdjJrIiwiZ2VuZXJhdG9yIjoiQ29tcGxleGlvIEVudGVycHJpc2UgQXV0b21hdG9yIiwiaWF0IjoxNzk0MjM4MTA5LCJtaWQiOiIwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsIm9uX2JlaGFsZl9vZiI6InRoZSBjb21wYW55Iiwic3BlYyI6ImNvbXBsZXhpby1haS1kaXNjbG9zdXJlLzEifQ.\" style=\"display:none\" aria-hidden=\"true\"></div>"
+      }
+    },
+    {
+      "name": "site_link",
+      "input": {
+        "text": "Please confirm laytime.\nThanks",
+        "entity": "Example Shipping Ltd",
+        "mid": "20b56aa04ec84500bf52f6e0c683d1f3",
+        "iat": 1794238110,
+        "site_url": "https://ai-disclosure.example.test/check"
+      },
+      "expected": {
+        "canonical": "Pleaseconfirmlaytime.ThanksThisemailwasgeneratedbyanAIsystem(ComplexioEnterpriseAutomator)onbehalfofExampleShippingLtd.Pleaseverifybeforetakingaction.Howtocheckthislabel:\u001ehttps://ai-disclosure.example.test/check\u001fhttps://ai-disclosure.example.test/check",
+        "content_sha256": "r0xaCgn0xB0Bx_-oGl9-To2TNwes_f5pYpJwVeiTUUk",
+        "token": "eyJhbGciOiJub25lIiwidHlwIjoiYWktZGlzY2xvc3VyZStqd3QifQ.eyJhaV9nZW5lcmF0ZWQiOnRydWUsImNhbm9uIjoidGV4dC1saW5rcy8xIiwiY29udGVudF9zaGEyNTYiOiJyMHhhQ2duMHhCMEJ4Xy1vR2w5LVRvMlROd2VzX2Y1cFlwSndWZWlUVVVrIiwiZ2VuZXJhdG9yIjoiQ29tcGxleGlvIEVudGVycHJpc2UgQXV0b21hdG9yIiwiaWF0IjoxNzk0MjM4MTEwLCJtaWQiOiIyMGI1NmFhMDRlYzg0NTAwYmY1MmY2ZTBjNjgzZDFmMyIsIm9uX2JlaGFsZl9vZiI6IkV4YW1wbGUgU2hpcHBpbmcgTHRkIiwic3BlYyI6ImNvbXBsZXhpby1haS1kaXNjbG9zdXJlLzEifQ.",
+        "html_body": "<div data-ai-content=\"20b56aa04ec84500bf52f6e0c683d1f3\"><div>Please confirm laytime.<br>Thanks</div><p><small><em>This email was generated by an AI system (Complexio Enterprise Automator) on behalf of Example Shipping Ltd. Please verify before taking action.<br>How to check this label: <a href=\"https://ai-disclosure.example.test/check\">https://ai-disclosure.example.test/check</a></em></small></p></div><div data-ai-disclosure=\"eyJhbGciOiJub25lIiwidHlwIjoiYWktZGlzY2xvc3VyZStqd3QifQ.eyJhaV9nZW5lcmF0ZWQiOnRydWUsImNhbm9uIjoidGV4dC1saW5rcy8xIiwiY29udGVudF9zaGEyNTYiOiJyMHhhQ2duMHhCMEJ4Xy1vR2w5LVRvMlROd2VzX2Y1cFlwSndWZWlUVVVrIiwiZ2VuZXJhdG9yIjoiQ29tcGxleGlvIEVudGVycHJpc2UgQXV0b21hdG9yIiwiaWF0IjoxNzk0MjM4MTEwLCJtaWQiOiIyMGI1NmFhMDRlYzg0NTAwYmY1MmY2ZTBjNjgzZDFmMyIsIm9uX2JlaGFsZl9vZiI6IkV4YW1wbGUgU2hpcHBpbmcgTHRkIiwic3BlYyI6ImNvbXBsZXhpby1haS1kaXNjbG9zdXJlLzEifQ.\" style=\"display:none\" aria-hidden=\"true\"></div>"
+      }
+    },
+    {
+      "name": "site_link_with_special_characters",
+      "input": {
+        "text": "Pay USD 1.00 by 12:30.",
+        "entity": "Smith & \"Sons\" <Ltd>",
+        "mid": "00000000000000000000000000000002",
+        "iat": 1794238111,
+        "site_url": "https://ai-disclosure.example.test/c?a=1&b=\"2\"&c='3'<4>"
+      },
+      "expected": {
+        "canonical": "PayUSD1.00by12:30.ThisemailwasgeneratedbyanAIsystem(ComplexioEnterpriseAutomator)onbehalfofSmith&\"Sons\"<Ltd>.Pleaseverifybeforetakingaction.Howtocheckthislabel:\u001ehttps://ai-disclosure.example.test/c?a=1&b=\"2\"&c='3'<4>\u001fhttps://ai-disclosure.example.test/c?a=1&b=\"2\"&c='3'<4>",
+        "content_sha256": "wfBMVp8EdiwZBzHUY3E1S-xE5DziBdE6DKFi1jV5h-A",
+        "token": "eyJhbGciOiJub25lIiwidHlwIjoiYWktZGlzY2xvc3VyZStqd3QifQ.eyJhaV9nZW5lcmF0ZWQiOnRydWUsImNhbm9uIjoidGV4dC1saW5rcy8xIiwiY29udGVudF9zaGEyNTYiOiJ3ZkJNVnA4RWRpd1pCekhVWTNFMVMteEU1RHppQmRFNkRLRmkxalY1aC1BIiwiZ2VuZXJhdG9yIjoiQ29tcGxleGlvIEVudGVycHJpc2UgQXV0b21hdG9yIiwiaWF0IjoxNzk0MjM4MTExLCJtaWQiOiIwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMiIsIm9uX2JlaGFsZl9vZiI6IlNtaXRoICYgXCJTb25zXCIgPEx0ZD4iLCJzcGVjIjoiY29tcGxleGlvLWFpLWRpc2Nsb3N1cmUvMSJ9.",
+        "html_body": "<div data-ai-content=\"00000000000000000000000000000002\"><div>Pay USD 1.00 by 12:30.</div><p><small><em>This email was generated by an AI system (Complexio Enterprise Automator) on behalf of Smith &amp; \"Sons\" &lt;Ltd&gt;. Please verify before taking action.<br>How to check this label: <a href=\"https://ai-disclosure.example.test/c?a=1&amp;b=&quot;2&quot;&amp;c=&#x27;3&#x27;&lt;4&gt;\">https://ai-disclosure.example.test/c?a=1&amp;b=\"2\"&amp;c='3'&lt;4&gt;</a></em></small></p></div><div data-ai-disclosure=\"eyJhbGciOiJub25lIiwidHlwIjoiYWktZGlzY2xvc3VyZStqd3QifQ.eyJhaV9nZW5lcmF0ZWQiOnRydWUsImNhbm9uIjoidGV4dC1saW5rcy8xIiwiY29udGVudF9zaGEyNTYiOiJ3ZkJNVnA4RWRpd1pCekhVWTNFMVMteEU1RHppQmRFNkRLRmkxalY1aC1BIiwiZ2VuZXJhdG9yIjoiQ29tcGxleGlvIEVudGVycHJpc2UgQXV0b21hdG9yIiwiaWF0IjoxNzk0MjM4MTExLCJtaWQiOiIwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMiIsIm9uX2JlaGFsZl9vZiI6IlNtaXRoICYgXCJTb25zXCIgPEx0ZD4iLCJzcGVjIjoiY29tcGxleGlvLWFpLWRpc2Nsb3N1cmUvMSJ9.\" style=\"display:none\" aria-hidden=\"true\"></div>"
+      }
+    }
+  ],
+  "signed_as_written": [
+    {
+      "name": "allowlisted_body_reads_verified",
+      "input": {
+        "parts": [
+          "<p>Pay <b>USD 1.00</b> by <a href=\"https://x.test/t\">Friday</a>.</p>",
+          "<p><small><em>This email was generated by an AI system (Complexio Enterprise Automator) on behalf of the company. Please verify before taking action.</em></small></p>"
+        ],
+        "mid": "00000000000000000000000000000001"
+      },
+      "expected": {
+        "content_html": "<div data-ai-content=\"00000000000000000000000000000001\"><p>Pay <b>USD 1.00</b> by <a href=\"https://x.test/t\">Friday</a>.</p><p><small><em>This email was generated by an AI system (Complexio Enterprise Automator) on behalf of the company. Please verify before taking action.</em></small></p></div>",
+        "canonical": "PayUSD1.00by\u001ehttps://x.test/t\u001fFriday.ThisemailwasgeneratedbyanAIsystem(ComplexioEnterpriseAutomator)onbehalfofthecompany.Pleaseverifybeforetakingaction.",
+        "content_sha256": "xKUfDMhPgzYU2Y4BWpKruyNMDFlVtehNXFYOU39jDkI",
+        "content": "match",
+        "verdict": "verified",
+        "first_violation": null
+      }
+    },
+    {
+      "name": "strikethrough_reads_unmarked_content",
+      "input": {
+        "parts": [
+          "<p>We <s>approve</s> the terms.</p>",
+          "<p><small><em>This email was generated by an AI system (Complexio Enterprise Automator) on behalf of the company. Please verify before taking action.</em></small></p>"
+        ],
+        "mid": "00000000000000000000000000000002"
+      },
+      "expected": {
+        "content_html": "<div data-ai-content=\"00000000000000000000000000000002\"><p>We <s>approve</s> the terms.</p><p><small><em>This email was generated by an AI system (Complexio Enterprise Automator) on behalf of the company. Please verify before taking action.</em></small></p></div>",
+        "canonical": "Weapprovetheterms.ThisemailwasgeneratedbyanAIsystem(ComplexioEnterpriseAutomator)onbehalfofthecompany.Pleaseverifybeforetakingaction.",
+        "content_sha256": "zNdrrNj7Wo9Sj91P4wxAh9QMPKM-nsfX-ssMsoM7P2s",
+        "content": "match",
+        "verdict": "verified_with_unmarked_content",
+        "first_violation": "inside:s"
+      }
+    },
+    {
+      "name": "subscript_reads_unmarked_content",
+      "input": {
+        "parts": [
+          "<p>Ship 5 t of H<sub>2</sub>O.</p>",
+          "<p><small><em>This email was generated by an AI system (Complexio Enterprise Automator) on behalf of the company. Please verify before taking action.</em></small></p>"
+        ],
+        "mid": "00000000000000000000000000000003"
+      },
+      "expected": {
+        "content_html": "<div data-ai-content=\"00000000000000000000000000000003\"><p>Ship 5 t of H<sub>2</sub>O.</p><p><small><em>This email was generated by an AI system (Complexio Enterprise Automator) on behalf of the company. Please verify before taking action.</em></small></p></div>",
+        "canonical": "Ship5tofH2O.ThisemailwasgeneratedbyanAIsystem(ComplexioEnterpriseAutomator)onbehalfofthecompany.Pleaseverifybeforetakingaction.",
+        "content_sha256": "463P86aNgFV3jmxZxi5mpapYrFhQWTg_Omw3tj9K6lg",
+        "content": "match",
+        "verdict": "verified_with_unmarked_content",
+        "first_violation": "inside:sub"
+      }
+    },
+    {
+      "name": "superscript_reads_unmarked_content",
+      "input": {
+        "parts": [
+          "<p>Pay 10<sup>6</sup> USD.</p>",
+          "<p><small><em>This email was generated by an AI system (Complexio Enterprise Automator) on behalf of the company. Please verify before taking action.</em></small></p>"
+        ],
+        "mid": "00000000000000000000000000000004"
+      },
+      "expected": {
+        "content_html": "<div data-ai-content=\"00000000000000000000000000000004\"><p>Pay 10<sup>6</sup> USD.</p><p><small><em>This email was generated by an AI system (Complexio Enterprise Automator) on behalf of the company. Please verify before taking action.</em></small></p></div>",
+        "canonical": "Pay106USD.ThisemailwasgeneratedbyanAIsystem(ComplexioEnterpriseAutomator)onbehalfofthecompany.Pleaseverifybeforetakingaction.",
+        "content_sha256": "lxDm6DC3DZDSKBmnfbU2btqBB3LZKVBaQuXU6e9NO9I",
+        "content": "match",
+        "verdict": "verified_with_unmarked_content",
+        "first_violation": "inside:sup"
+      }
+    },
+    {
+      "name": "unclosed_style_before_the_footer",
+      "input": {
+        "parts": [
+          "<p>Confirmed.</p><style>p{display:none}",
+          "<p><small><em>This email was generated by an AI system (Complexio Enterprise Automator) on behalf of the company. Please verify before taking action.</em></small></p>"
+        ],
+        "mid": "00000000000000000000000000000005"
+      },
+      "expected": {
+        "content_html": "<div data-ai-content=\"00000000000000000000000000000005\"><p>Confirmed.</p><style>p{display:none}</style><p><small><em>This email was generated by an AI system (Complexio Enterprise Automator) on behalf of the company. Please verify before taking action.</em></small></p></div>",
+        "canonical": "Confirmed.ThisemailwasgeneratedbyanAIsystem(ComplexioEnterpriseAutomator)onbehalfofthecompany.Pleaseverifybeforetakingaction.",
+        "content_sha256": "U_z-wd-JWFtTnwTA7C82wiNn9wy3VjclkQJu4Od_2WM",
+        "content": "match",
+        "verdict": "verified_with_unmarked_content",
+        "first_violation": "inside:style"
+      }
+    },
+    {
+      "name": "unclosed_comment_before_the_footer",
+      "input": {
+        "parts": [
+          "<p>Confirmed.</p><!-- draft note",
+          "<p><small><em>This email was generated by an AI system (Complexio Enterprise Automator) on behalf of the company. Please verify before taking action.</em></small></p>"
+        ],
+        "mid": "00000000000000000000000000000006"
+      },
+      "expected": {
+        "content_html": "<div data-ai-content=\"00000000000000000000000000000006\"><p>Confirmed.</p><!-- draft note--><p><small><em>This email was generated by an AI system (Complexio Enterprise Automator) on behalf of the company. Please verify before taking action.</em></small></p></div>",
+        "canonical": "Confirmed.ThisemailwasgeneratedbyanAIsystem(ComplexioEnterpriseAutomator)onbehalfofthecompany.Pleaseverifybeforetakingaction.",
+        "content_sha256": "U_z-wd-JWFtTnwTA7C82wiNn9wy3VjclkQJu4Od_2WM",
+        "content": "match",
+        "verdict": "verified_with_unmarked_content",
+        "first_violation": "inside:#comment"
+      }
+    },
+    {
+      "name": "styled_body_reads_unmarked_content",
+      "input": {
+        "parts": [
+          "<div style=\"font-family:Segoe UI,sans-serif;font-size:11pt\">Confirmed.</div>",
+          "<p><small><em>This email was generated by an AI system (Complexio Enterprise Automator) on behalf of the company. Please verify before taking action.</em></small></p>"
+        ],
+        "mid": "00000000000000000000000000000007"
+      },
+      "expected": {
+        "content_html": "<div data-ai-content=\"00000000000000000000000000000007\"><div style=\"font-family:Segoe UI,sans-serif;font-size:11pt\">Confirmed.</div><p><small><em>This email was generated by an AI system (Complexio Enterprise Automator) on behalf of the company. Please verify before taking action.</em></small></p></div>",
+        "canonical": "Confirmed.ThisemailwasgeneratedbyanAIsystem(ComplexioEnterpriseAutomator)onbehalfofthecompany.Pleaseverifybeforetakingaction.",
+        "content_sha256": "U_z-wd-JWFtTnwTA7C82wiNn9wy3VjclkQJu4Od_2WM",
+        "content": "match",
+        "verdict": "verified_with_unmarked_content",
+        "first_violation": "inside:div[style]"
+      }
+    }
+  ],
+  "strip_markdown": [
+    {
+      "name": "a heading after an empty heading",
+      "input": "#\n# Laytime\nok",
+      "output": "Laytime\nok"
+    },
+    {
+      "name": "marks mid-line are not headings or bullets",
+      "input": "Rate ## 5 - net\n  - item\n#\n\n## Next",
+      "output": "Rate ## 5 - net\n- item\nNext"
+    },
+    {
+      "name": "bold, italics, code",
+      "input": "**Confirmed** by *Friday*, see `ref 12`.",
+      "output": "Confirmed by Friday, see ref 12."
+    },
+    {
+      "name": "heading and bullets",
+      "input": "## Laytime\n* NOR tendered\n• Berth free",
+      "output": "Laytime\n- NOR tendered\n- Berth free"
+    },
+    {
+      "name": "link",
+      "input": "See [the clause](https://x.test/a?b=1).",
+      "output": "See the clause (https://x.test/a?b=1)."
+    },
+    {
+      "name": "table",
+      "input": "Summary\n\n| Item | Due |\n| --- | --- |\n| NOR | Friday |\n| LOP |  |",
+      "output": "Summary\n\n- Item: NOR, Due: Friday\n- Item: LOP"
+    },
+    {
+      "name": "amount untouched",
+      "input": "USD 1.00 to a.b@example.test, 2*3 and a_b_c",
+      "output": "USD 1.00 to a.b@example.test, 2*3 and a_b_c"
+    },
+    {
+      "name": "nbsp_edges_trimmed",
+      "input": "  Pay now ",
+      "output": "Pay now"
+    },
+    {
+      "name": "feff_edges_trimmed",
+      "input": "﻿Pay now﻿",
+      "output": "Pay now"
+    },
+    {
+      "name": "nel_edges_trimmed",
+      "input": "Pay now",
+      "output": "Pay now"
+    },
+    {
+      "name": "nbsp_after_heading_marker",
+      "input": "#  Laytime",
+      "output": "Laytime"
+    },
+    {
+      "name": "feff_after_heading_marker",
+      "input": "#﻿Laytime",
+      "output": "Laytime"
+    },
+    {
+      "name": "nbsp_is_not_a_bullet_gap",
+      "input": "* NOR tendered",
+      "output": "* NOR tendered"
+    },
+    {
+      "name": "nbsp_inside_italics_is_whitespace",
+      "input": "a * b* c *d* e",
+      "output": "a * b* c d e"
+    },
+    {
+      "name": "feff_inside_link_target",
+      "input": "[x](a﻿b)",
+      "output": "[x](a﻿b)"
+    },
+    {
+      "name": "link_target_with_nel",
+      "input": "[x](ab)",
+      "output": "[x](ab)"
+    },
+    {
+      "name": "carriage_return_is_not_a_line_start",
+      "input": "a\r# b\r* c\r\n# d",
+      "output": "a\r# b\r* c\r\nd"
+    },
+    {
+      "name": "crlf_bullets",
+      "input": "* a\r\n* b",
+      "output": "- a\r\n- b"
+    },
+    {
+      "name": "carriage_return_inside_table_row",
+      "input": "| A |\n| --- |\n| x\ry |",
+      "output": "- A: x\ry"
+    },
+    {
+      "name": "line_separators_are_not_line_starts",
+      "input": "a # b * c",
+      "output": "a # b * c"
+    },
+    {
+      "name": "nested_lists",
+      "input": "* one\n  * two\n    - three\n\t• four",
+      "output": "- one\n- two\n- three\n- four"
+    },
+    {
+      "name": "fenced_code_block",
+      "input": "Run:\n```\n**bold** in `code`\n```\nDone",
+      "output": "Run:\n```\nbold in code\n```\nDone"
+    },
+    {
+      "name": "backslash_escapes_are_not_honoured",
+      "input": "a \\*not italic\\* b \\# c\n\\# not a heading",
+      "output": "a \\not italic\\ b \\# c\n\\# not a heading"
+    }
+  ]
+}

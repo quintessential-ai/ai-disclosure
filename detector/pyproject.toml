@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ai-disclosure-verify"
+version = "0.1.0"
+description = "Verify the AI-disclosure marker in an email: detect, check the signature, read the verdict."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+    "cryptography>=43",
+    "defusedxml>=0.7.1",
+    "html5lib>=1.1",
+]
+
+[project.scripts]
+ai-disclosure-verify = "ai_disclosure_verify.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ai_disclosure_verify"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# Generated from the reference implementation; kept as it has them.
+"src/ai_disclosure_verify/{canonical,detect,files,jws,constants}.py" = ["I001", "E501", "B904"]
+
+[tool.ty.environment]
+python = ".venv"

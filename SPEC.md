@@ -1,0 +1,610 @@
+# Complexio AI disclosure marker, version 1
+
+This specification describes how Complexio marks email written by its AI
+system, Complexio Enterprise Automator, and files written by Complexio
+Stevie, so that the marking is
+machine-readable and anyone who receives the email can detect and verify it.
+It is published so recipients, mail gateways and tooling can check the marker
+without Complexio's software. A reference verifier and command-line
+detector are described at the end.
+
+Spec identifier: `complexio-ai-disclosure/1`.
+
+## What is marked
+
+An outbound email whose body the AI system wrote. The marker states that the
+content is AI-generated, names the system, and names the entity on whose
+behalf it was sent.
+
+A human may review or edit the AI's text before the system sends it (for
+example, an operator approving or amending a proposed email). Such a message
+is still marked and signed as AI-generated: the system issues the marker over
+the final text when it sends it, so the marker verifies.
+
+A human may also take an AI-written draft and send it themselves after
+editing it, for example in Outlook. The draft's header and hidden block go
+out unchanged, but the text no longer matches the signed digest. A verifier
+then reports the content as changed after signing, and the message as
+marked but not verified. That is the expected result for an edited draft, not
+a fault: the marker shows the message started as AI-generated content and that
+someone changed it afterwards.
+
+Each message also carries a visible footer saying the same in words. Once the
+page that publishes this specification has its fixed address, the footer ends
+with the line "How to check this label:" followed by that address as a visible
+link. The footer is inside the content container, so the link is covered by
+the digest: a changed link reads as content changed after signing. This
+specification covers only the machine-readable marker.
+
+Office (`.docx`, `.xlsx`, `.pptx`) and PDF files written by Complexio Stevie
+carry the same token in their metadata; see [Files](#files).
+
+## Carriers
+
+One marker is issued per message. It travels in up to three places, all
+bound together by the marker id (`mid`).
+
+| Carrier | Form | Present on |
+| --- | --- | --- |
+| `X-Complexio-AI-Disclosure` header | The marker token (see [Token](#token)) | Messages Complexio creates directly (new messages and new drafts) |
+| `X-AI-Generated` header | `true` | Same as above |
+| Hidden body block | `<div data-ai-disclosure="TOKEN" style="display:none" aria-hidden="true"></div>` | Every HTML message, including replies |
+| Content container | `<div data-ai-content="MID">…the AI-written content and the visible footer…</div>` | Every HTML message, including replies |
+
+`X-AI-Generated` is unsigned. It is a convenience for filters and carries no
+proof; verifiers should rely on the token.
+
+The token in the header and the token in the hidden block are identical. The
+content container opens the message and holds the AI-written text and the
+visible disclosure footer; the hidden block follows it. In a reply, the
+quoted conversation comes after the hidden block.
+
+Before wrapping, the issuer balances the AI-written HTML and the footer
+separately and joins them, so nothing left open in the AI's HTML (a comment,
+`<style>` or `<textarea>`, a hidden element) can swallow or hide the footer.
+It removes nothing: content is signed and sent as written, and only a
+verifier applies the [markup allowlist](#markup-allowlist). The issuer parses
+each part as a whole document and writes the tree back:
+
+- the children of `body`, after the `style` and `link` elements of `head`
+  and any comments around the document scaffolding (Outlook's conditional
+  comments sit there), in document order. The attributes of `html` and
+  `body`, and `title`, `meta`, `base` and `script` in `head`, are not
+  carried;
+- every element closed, and every comment and raw-text element (`style`,
+  `script`, `textarea`, `title`, `xmp`) ended, so no part can move the end
+  of the next part or of the container;
+- `plaintext`, which cannot be closed, as `pre`, and a `script` whose text
+  contains `<!--` without its text, since that text can stop its end tag
+  from closing it;
+- inside `noscript`, every `</noscript` in a comment or raw text written as
+  `<\/noscript`: the issuer parses with scripting off, but a reader with
+  scripting on takes `noscript` as raw text ending at the first `</noscript`.
+  A `noscript` holding a foreign `noscript` (in `svg` or `math`), whose end
+  tag would end it early, is sent as written.
+
+Content the parser moved out of a table is written where the parser put it,
+in front of the table. The footer is `<p><small><em>…</em></small></p>`, with
+no styling. The issuer computes the digest from the wrapped container, read
+as a verifier reads it, so the digest covers exactly what is sent.
+
+The issuer's depth and element caps are 64 below a verifier's, and its size
+cap 64 KiB below, so what it signs, with the hidden block and a sender's
+`html` and `body` around it, always parses for a verifier. Content over the
+issuer's caps in [Parsing](#parsing), content the parser fails on, and
+content that, wrapped in the container and parsed again, does not write back
+to exactly the bytes being sent (html5lib builds a few such trees, such as an
+HTML `p` left inside `svg`, which breaks out when parsed again and can leave
+an element open around the footer) is sent as written,
+with an unsigned marker. The container then holds only the footer, and the
+content follows the hidden block, so the footer shows above the content and
+nothing the content leaves open can swallow the footer or the marker. Its
+`html` and `body` start tags are written as text (`&lt;body …`), since a
+parser merges their attributes, `hidden` or `style` among them, onto the
+page's own `html` and `body`.
+
+Because content is signed as written, AI-written markup outside the
+allowlist (an inline style, a class, a head style sheet) sits inside the
+signed container, and such a message reads at best
+`verified_with_unmarked_content`. Only a message whose content is all
+allowlisted markup reads `verified`.
+
+The footer can still be hidden, and the issuer cannot prevent it without
+rewriting the content:
+
+- a style sheet in the content, or in the quoted conversation a reply draft
+  puts after it, can restyle or hide the footer;
+- renderers built on parse5 lose the footer and the hidden block on a few
+  nestings of `template` inside `svg` that html5lib and browsers read
+  correctly.
+
+The issuer logs each message whose content carries a style sheet (`style` or
+`link`), as `ai_disclosure_content_style_sheet` with the count, so how often
+this can happen is measured.
+
+## Token
+
+The token is a compact JWS ([RFC 7515](https://www.rfc-editor.org/rfc/rfc7515))
+with a JSON payload.
+
+### Protected header
+
+| Member | Value |
+| --- | --- |
+| `alg` | `EdDSA` (Ed25519, [RFC 8037](https://www.rfc-editor.org/rfc/rfc8037)), or `none` for an unsigned marker |
+| `typ` | `ai-disclosure+jwt` |
+| `kid` | Key id of the signing key; absent when `alg` is `none` |
+
+No other header members are used. A token carrying `crit` is invalid.
+
+### Payload
+
+| Claim | Type | Meaning |
+| --- | --- | --- |
+| `spec` | string | `complexio-ai-disclosure/1` |
+| `ai_generated` | boolean | Always `true` |
+| `generator` | string | The AI system: `Complexio Enterprise Automator`, or `Complexio Stevie` for files |
+| `on_behalf_of` | string | The entity the message is sent on behalf of (the deploying organisation) |
+| `iat` | integer | Issue time, seconds since the Unix epoch (UTC) |
+| `mid` | string | Marker id: 32 lowercase hex characters, random per message |
+| `canon` | string | Canonicalisation used for `content_sha256`: `text-links/1` for messages, `ooxml-parts/1` or `pdf-revision/1` for files |
+| `content_sha256` | string | Unpadded base64url SHA-256 of the canonical content (below) |
+
+Example payload:
+
+```json
+{
+  "ai_generated": true,
+  "canon": "text-links/1",
+  "content_sha256": "HqtrRXPLKxZ03i6kBAueIa4X0NLwjEX93dU6OW9gkJU",
+  "generator": "Complexio Enterprise Automator",
+  "iat": 1794238106,
+  "mid": "20b56aa04ec84500bf52f6e0c683d1f2",
+  "on_behalf_of": "Example Shipping Ltd",
+  "spec": "complexio-ai-disclosure/1"
+}
+```
+
+### Unsigned markers
+
+When a deployment has no signing key, the marker is still issued, with
+`alg: none`, no `kid` and an empty signature part (`HEADER.PAYLOAD.`). It
+states the same facts but proves nothing about its origin. A verifier reports
+it as unsigned and never as verified. A token with `alg: none` and a
+non-empty signature is invalid.
+
+## Markup allowlist
+
+The marker vouches for content held in a fixed set of elements, attributes
+and URL schemes. Anything else in a message is a *violation*. A verifier
+does not predict how a mail client would render such markup; it reports it.
+
+**Elements** (HTML namespace): `p`, `br`, `div`, `span`, `a`, `b`, `strong`,
+`i`, `em`, `u`, `small`, `blockquote`, `pre`, `code`,
+`h1`–`h6`, `hr`, `ul`, `ol` (no `start` or `type`: a list counter can
+spell words), `li`, `table`, `thead`, `tbody`, `tfoot`, `tr`,
+`td`, `th`, `caption`, `img`. Not `s`, `del`, `ins`, `sub` or `sup`: each
+changes what the text says (`We <s>approve</s>` reads as a refusal,
+`10<sup>6</sup>` as a million) without changing the digest.
+
+**Document scaffolding:** `html`, `head` and `body` as the parser builds
+them. `title` and `meta` only as children of `head`. Any text in `head` or
+in its `title`, other than ASCII whitespace, is a violation, and so is any
+other element in `head`.
+
+**Attributes.** Any attribute not listed is a violation, including `style`,
+`class`, `id`, `hidden`, `srcset`, `srcdoc`, `background`, event handlers
+(`on…`), `data-…` and `aria-…`:
+
+| Element | Attributes |
+| --- | --- |
+| any | `lang` |
+| `html`, `body` | `dir`, only with the value `ltr` (ASCII case-insensitive). Nowhere else: on a `span`, `dir` isolates digit groups and shows them in reverse order ("2000 3000" as "3000 2000") without adding a character |
+| `a` | `href`, `title` |
+| `img` | `src`, `alt` (no size: a zero size hides a signed image) |
+| `table` | `border`, `cellpadding`, `cellspacing`, `width` |
+| `td`, `th` | `colspan`, `rowspan`, `align`, `valign`, `width` |
+| `meta` | `charset`, `content`, and `http-equiv` only with the value `content-type` (ASCII case-insensitive, trimmed) |
+
+`originalsrc` and `shash` on `a` are ignored: never a violation, and not part
+of the digest. They are taken from the attributes Outlook's Safe Links adds
+to links; that is not confirmed on a received sample.
+
+**URL schemes.** After the preprocessing in [URL items](#url-items) (trim
+C0 controls and spaces; remove tab, LF and CR), a URL's scheme is the text
+before the first `:`, when that text is an ASCII letter followed by ASCII
+letters, digits, `+`, `-` or `.`. It is compared ASCII case-insensitively.
+`a href` must be `http`, `https`, `mailto` or `tel`; `img src` must be
+`https` (not `cid`: a Content-ID names an attachment, it does not bind its
+bytes). A URL without a scheme (empty, relative, `//host`) is a
+violation. When the URL is a strictly valid Safe Links URL, the target it
+carries must pass the same check.
+
+**Our own structure**, exactly:
+
+- the content container is a `div` whose only attribute is
+  `data-ai-content`, a child of `body` and not inside another container.
+  Any other element carrying `data-ai-content`, a second container for the
+  same `mid`, or a container with another element between it and `body` is
+  a violation;
+- the hidden block is a `div` with exactly three attributes:
+  `data-ai-disclosure`, `style` with the exact string `display:none` (not
+  parsed as CSS), and `aria-hidden="true"`. It is outside every container and
+  has no content. Any other element carrying `data-ai-disclosure`, or a
+  block in any other shape, is a violation.
+
+**Also violations:** every comment, including Outlook's conditional
+comments (`<!--[if mso]>…<![endif]-->` and `<!--[if !mso]><!-->…<!--<![endif]-->`),
+and so CDATA sections and processing instructions, which an HTML parser reads
+as comments; every element in the SVG or MathML namespace; and every text
+node or element the parser moves out of a `table`, `tbody`, `thead`, `tfoot`
+or `tr` (foster parenting). The reference implementation records each
+foster-parenting step as the parser takes it and reports it at the table the
+content was moved in front of.
+
+A violation is *inside* when it sits within the original's content
+container (the container's own extra attributes included), and *outside*
+otherwise.
+
+## Canonical content (`text-links/1`)
+
+The digest covers what a recipient reads and what the message links to or
+loads: the text, the target of every link and image, and the text of link
+titles and image descriptions. It does not cover markup, so it survives the
+rewriting mail servers and clients apply to HTML. Nothing signed with an
+earlier definition of `text-links/1` was ever sent, so the identifier is kept
+for this definition.
+
+### Parsing
+
+The document is parsed with the HTML5 parsing algorithm (WHATWG HTML, tree
+construction, scripting disabled); the reference implementation uses
+html5lib. All of what follows reads the resulting tree, never the markup as
+written: a misplaced `<head>`, a stray closing tag or an unclosed element
+counts where the parser put it.
+
+Parsers differ from each other and from browsers on markup outside the
+allowlist (foreign content, `template`, `select`, `isindex`). That markup is
+a violation whichever way it parses, so the guarantee does not rest on
+matching a browser: a `verified` marker means the content container holds
+only allowlisted markup, and its text and links are what was signed.
+
+A document is *unparseable* when the parser fails on it or it exceeds a cap:
+
+- a UTF-8 encoding longer than 5 MiB (5,242,880 bytes);
+- elements nested more than 256 deep, counting `html` and `body`;
+- more than 64 attributes on one tag;
+- more than 200,000 elements, counting each one the parser creates.
+
+The caps bound parse time: html5lib's cost grows with the square of the
+nesting depth and of the attributes on one tag.
+
+### Walk
+
+Walk the tree in tree order (pre-order: an element, then its children in
+order). Comments and the doctype contribute nothing.
+
+- The content of a **non-rendered** element contributes nothing. These are,
+  by local name in any namespace: `script`, `style`, `template`, `title`,
+  `iframe`, `noembed`, `noframes`. Each is also a violation; the rule only
+  decides what counts as text before or outside a container.
+- A **text node** contributes its data, with character references decoded,
+  as a text item.
+- An HTML `a` element contributes, when it is visited and before its
+  children, a URL item for its `href`, then an attribute-text item for its
+  `title`. An HTML `img` element contributes a URL item for its `src`, then
+  an attribute-text item for its `alt`. Where an attribute is repeated in the
+  markup, the parser keeps the first value. No other attribute contributes.
+
+### URL items
+
+A URL value is normalised before it enters the stream:
+
+1. trim leading and trailing code points U+0000–U+0020, and remove every
+   U+0009, U+000A and U+000D, as WHATWG URL parsing does. Inner spaces are
+   kept;
+2. if it is a strictly valid Safe Links URL (below), replace it with the
+   target it carries and apply step 1 to the target;
+3. percent-encode each remaining U+0000–U+001F and U+007F as `%XX`
+   (uppercase hex). Nothing else: no case folding, no percent-decoding, no
+   resolving against a base URL, no Unicode normalisation.
+
+An empty value contributes nothing.
+
+A **strictly valid Safe Links URL**:
+
+- begins with `https://`, compared case-insensitively;
+- its host is the text after `https://` up to the first `/`, `?` or `#`;
+- that host, lowercased, consists of ASCII characters only and fully
+  matches `[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.safelinks\.protection\.outlook\.com`.
+
+That pattern admits no `\`, `@`, `:`, `%` or non-ASCII character, so a
+backslash, userinfo, a port, a percent-encoded host or an IDNA host all fail
+it, and so does any host a WHATWG parser would read differently. The target
+is the value of the first query parameter named exactly `url` in the query
+(after the first `?`, before any `#`), decoded as
+`application/x-www-form-urlencoded`. A URL that is not strictly valid is
+hashed as it is.
+
+### Canonical string
+
+1. Split the item sequence into maximal runs of consecutive text items,
+   separated by URL and attribute-text items.
+2. For each text run, and for each attribute-text item on its own:
+   concatenate, remove U+0000–U+001F and U+007F, normalise to Unicode NFC,
+   then remove every occurrence of U+0009–U+000D, U+0020, U+0085, U+00A0,
+   U+1680, U+2000–U+200D, U+2028, U+2029, U+202F, U+205F, U+2060, U+3000,
+   U+FEFF. An attribute-text item that is then empty contributes nothing.
+3. Write each URL item as U+001E, the normalised URL, U+001F, and each
+   attribute-text item as U+001D, its normalised text, U+001F. Step 2 and
+   the URL percent-encoding guarantee those three code points come only
+   from these delimiters. URL items are not NFC-normalised and keep their
+   whitespace.
+4. Concatenate the runs and items in order.
+5. `content_sha256` is the SHA-256 of the UTF-8 encoding, in unpadded
+   base64url.
+
+The content's string is built from the walk of the content container's
+subtree only.
+
+**Plain text** (no HTML) is one text item: steps 2 and 5 apply. Its digest
+equals the digest of an HTML rendering of the same words only when that HTML
+carries no link or image. An issuer that turns text into HTML digests the
+HTML it actually sends.
+
+Re-wrapped lines, non-breaking spaces and leading or trailing whitespace in a
+URL attribute leave the digest unchanged. A changed visible character, link
+target, image source, link title or image description changes it.
+
+## Verifying a message
+
+1. Parse the HTML body (see [Parsing](#parsing)). An unparseable body ends
+   verification: the verdict is `unparseable`. Otherwise collect the
+   violations of the [markup allowlist](#markup-allowlist).
+2. Collect tokens: the `X-Complexio-AI-Disclosure` header, if present, and
+   every `data-ai-disclosure` attribute in the HTML body.
+3. For each token, decode the header and payload. Reject a token whose
+   header is not as specified above (`typ` other than `ai-disclosure+jwt`,
+   `crit` present, `alg` other than `EdDSA` or `none`), or whose payload is
+   not a version-1 payload: `spec` other than `complexio-ai-disclosure/1`,
+   `ai_generated` not `true`, a missing or wrongly typed claim, or a `mid`
+   that is not 32 lowercase hex characters. A rejected token is never
+   verified, whatever its signature.
+4. Check the signature: find the key whose `kid` matches in Complexio's
+   published key set (below) and verify the Ed25519 signature over the JWS
+   signing input. Outcomes: valid, invalid, unknown key, or unsigned.
+5. Check the content: find the content container with the token's `mid`,
+   compute its canonical digest and compare it with `content_sha256`.
+   Outcomes: match; mismatch, meaning the content changed after signing (a
+   person edited it, or a system in transit altered its text, links or
+   images); or not found (the container did not survive transport).
+6. Decide which marker is the message's own, on the parsed tree. A content
+   container *leads* the message when, walking the whole document (head
+   included) as in [Walk](#walk), no URL item and no text item with a
+   character outside the whitespace set comes before it, and it is neither
+   inside a `blockquote` nor inside another content container.
+   - The original is the first body marker whose container leads the
+     message. With a header token, it must also have the header's `mid`.
+   - A header token whose container does not lead the message is not the
+     message's own content: its content result is "not leading".
+   - Every other body marker is a quoted copy from earlier in the
+     conversation.
+7. Check coverage: does the walk outside the original container produce any
+   URL item, any attribute-text item, or any text item with a character
+   that step 2 of [Canonical string](#canonical-string) keeps, or does the
+   message have any element outside the original container other than the
+   scaffolding (`html`,
+   `head`, `body`, and `title` or `meta` in `head`) and hidden blocks in
+   their issued shape? Then the message has content outside it, even
+   without text: an empty list item numbers itself, a run of line breaks
+   pushes the content off screen. A reply's quoted conversation is such
+   content, and so is anything added around a copied fragment, in the head
+   included.
+8. Place each violation inside or outside the original container.
+
+A signature vouches for the text of one container, not for the message
+around it, and a signed fragment can be copied into another message.
+Verdicts:
+
+| Verdict | Meaning |
+| --- | --- |
+| `verified` | The original marker is valid, its digest matches, its container holds only allowlisted markup, and outside it the message holds nothing but empty scaffolding (`html`, `head`, `body`, an allowed `meta`, an empty `title`) and the hidden block. |
+| `verified_with_unmarked_content` | The signed text is intact, but styling or markup in or around it, which could change how it is shown, is not vouched for, nor is the rest of the message. The original marker is valid and its digest matches, but its container holds a violation of the markup allowlist (styling, a class, a comment, an element outside the list), or the message has content outside its container (text, links, images or any other element), or violations outside it (a quoted conversation, a head style sheet, a conditional comment, content added around a copied fragment). None of that may be attributed to the marker. |
+| `ai_marked_unverified` | The message carries its own marker but it does not verify: unsigned, bad or unknown signature, rejected token, content changed after signing (for example, a draft a person edited before sending), or missing or non-leading content. Also returned for any `X-AI-Generated` header, whatever its value, and for an earlier-format marker anywhere in the message, a quoted trail included (see below). A reply that merely quotes an earlier-format message therefore reads `ai_marked_unverified`; a caller checking mail it did not label itself must not read this verdict as "this message was labelled". |
+| `quoted_only` | Every marker is a quoted copy; the message quotes a marked message but was not itself marked. |
+| `no_marker` | No marker found. |
+| `unparseable` | The HTML body exceeds a cap in [Parsing](#parsing) or the parser failed on it. Nothing in it is verified. |
+
+Violations, inside the original container or outside it, turn a verdict
+that would otherwise be `verified` into `verified_with_unmarked_content`; a
+message without a verifying marker keeps its verdict. The reference detector reports the first violation inside the
+original container, or else the first in the message, as
+`inside:NAME` or `outside:NAME`, with the total count. `NAME` is an element
+(`style`), an element and attribute (`p[style]`), or one of `#comment`,
+`#foster-parented`, `#text-in-head` and `#content-not-in-body`.
+
+### Earlier marker format
+
+Messages sent before this specification carry a hidden block whose
+`data-ai-disclosure` attribute holds a JSON object (`ai_generated`, `system`,
+`on_behalf_of`, `spec: "EU-AI-Act-Article-50"`) rather than a token. Such a
+marker is unsigned and has no content container, so it can be detected but
+neither verified nor placed as original or quoted. Wherever it appears, the
+verdict is `ai_marked_unverified`.
+
+## Files
+
+A file carries one marker, its own. Office markers cover the package content
+and normalized routing. PDF markers cover only the revision preceding the
+marker-bearing update, not the displayed file as a whole. Writing the
+marker changes the file's metadata, so each file canonicalisation digests
+only what writing the marker leaves alone. The token is never visible in the
+document.
+
+| File | Carrier | `canon` |
+| --- | --- | --- |
+| Office (OOXML) | Custom document property `AIDisclosure` (`vt:lpwstr`) in the custom-properties part | `ooxml-parts/1` |
+| PDF | `/AIDisclosure` in the document information dictionary, and `cpxai:AIDisclosure` (`https://complexio.com/ns/ai-disclosure/1.0/`) in the XMP metadata | `pdf-revision/1` |
+
+Alongside the token the file carries unsigned convenience fields:
+`AIGenerated`, `AISystem` and `AIGeneratedAt`, and, in a PDF, the IPTC
+Digital Source Type `trainedAlgorithmicMedia`. Like `X-AI-Generated` they
+prove nothing.
+
+### `ooxml-parts/1`
+
+1. Reject duplicate part names, XML entity declarations, and ambiguous or
+   external custom-properties relationships. Select the custom-properties
+   part from the package relationship, defaulting to `docProps/custom.xml`
+   when no relationship exists. If present, its root must be the OOXML
+   custom-properties `Properties` element.
+2. List every part except directory entries and the selected custom-properties
+   part. Normalize `_rels/.rels` by removing only custom-properties
+   relationships, and `[Content_Types].xml` by removing only the selected
+   part's `Override`. Serialize these two parts as C14N 2.0, stripping text
+   whitespace and rewriting namespace prefixes. All other routing remains
+   signed. Sort the list by part name, in Unicode code point order.
+3. For each part, write `NAME`, a line feed, the unpadded base64url SHA-256
+   of the part's bytes, and a line feed.
+4. `content_sha256` is the unpadded base64url SHA-256 of that text, UTF-8
+   encoded.
+
+Recompressing or reordering the package keeps the digest; changing any
+part's content (text, numbers, styles, images) breaks it.
+
+### `pdf-revision/1`
+
+The marker is written as an incremental update, after the file as generated.
+`content_sha256` is the unpadded base64url SHA-256 of the file's bytes up to
+and including the last `%%EOF` before that update. A verifier finds the token
+in the raw bytes and digests up to the last `%%EOF` that precedes it.
+
+Any change to the generated revision breaks the digest. A later incremental
+update appended after the marker does not, and is not covered by it. A tool
+that rewrites the whole file (rather than appending) breaks the digest, and
+may move the token into a compressed object stream where the reference
+detector does not look for it.
+
+### Verifying a file
+
+Steps 2 and 3 of [Verifying a message](#verifying-a-message) apply
+unchanged. For step 4, recompute the digest for the token's `canon`; a token
+whose `canon` does not belong to the file type is unsupported. The verdict is
+`verified` when the signature is valid and the digest matches, and
+`ai_marked_unverified` otherwise. PDF verification always reports
+`verified_with_unmarked_content` instead of `verified` when the revision's
+signature and digest match, with CLI exit status 4: the marker-bearing update
+itself, including any page changes it contains, is outside the signature.
+It must not be attributed to the marker.
+
+## Keys
+
+Markers are signed with Ed25519. Each deployment of the system signs with its
+own key; the `kid` names it. Unless configured otherwise, the `kid` is the
+[RFC 7638](https://www.rfc-editor.org/rfc/rfc7638) thumbprint of the public
+key.
+
+Complexio publishes the public keys as a JWKS document
+([RFC 7517](https://www.rfc-editor.org/rfc/rfc7517)) over HTTPS. Each key is
+an OKP JWK with `crv: Ed25519`, `use: sig` and `alg: EdDSA`. A retired key
+stays in the set for as long as messages it signed may need verifying; a
+compromised key is removed and its markers are no longer verifiable.
+
+The key set is published at
+<https://ai-disclosure.complexio.com/.well-known/ai-disclosure-jwks.json>, served
+as `application/jwk-set+json` and open to cross-origin reads. Its address does
+not change when keys are added or retired.
+
+## Versioning
+
+The `spec` claim names the version. A change a version-1 verifier would
+misread (a new required claim, a changed meaning, a new canonicalisation)
+gets a new version; verifiers report a token with an unknown `spec` rather
+than trusting it. A new canonicalisation gets a new `canon` value, so a
+verifier can say it does not support it instead of reporting a mismatch.
+
+## Transport limits
+
+- Microsoft Graph accepts custom headers only on message creation and only
+  with names starting `x-`. Messages created as replies (`createReply`, then
+  updated) cannot carry them, so replies carry the body block only. More than
+  five custom headers on one message are reported to be refused.
+- A header line is limited to 998 characters
+  ([RFC 5322](https://www.rfc-editor.org/rfc/rfc5322) §2.1.1), and the token
+  cannot be folded. A token that would not fit (an exceptionally long
+  `on_behalf_of`) is sent in the body only.
+- Mail gateways and clients may remove hidden elements, `data-` attributes or
+  custom headers, and copying text out of a message removes all markup. The
+  marker is then lost or the content cannot be found; a lost marker does not
+  make the content human-written.
+- Link-rewriting gateways other than Microsoft Defender Safe Links (for
+  example, other vendors' URL protection) change link targets on delivery.
+  The digest then no longer matches, and the content is reported as changed
+  after signing.
+- The digest covers text, link and image targets, link titles and image
+  descriptions, not presentation. Allowlisted markup inside the container
+  can still be changed without changing the digest: emphasis, headings,
+  table layout and list items. A `verified` verdict says
+  the words and links are the signed ones, not that they look as they did
+  when signed.
+- Exchange and Outlook may rewrite a message's HTML in transit or on reply.
+  A reply composed by Exchange (`createReply`) carries the quoted
+  conversation in Outlook's own markup, outside the signed container;
+  such a reply reads at best `verified_with_unmarked_content`. Whether Exchange
+  keeps the hidden block's `style="display:none"` byte for byte has not been
+  confirmed on a received sample; a rewritten block reads as a violation
+  outside the container.
+
+## Text watermarking
+
+Complexio does not add a watermark of its own to the generated text.
+
+A statistical text watermark is applied while the text is generated, by
+steering, with a secret key, which tokens the model samples, so that a
+detector holding the key can later test for the pattern. That control sits
+inside the model. Where the text comes from a model reached through its
+provider's API, Complexio has no per-token control over sampling, so it
+cannot apply such a watermark. Of the routes after generation, inserting
+invisible characters does not survive copying or text normalisation, and
+substituting words changes the content the reader receives. Neither is used.
+
+The model provider, Anthropic, states that text from its supported models
+carries its own watermark, applied in the model, and publishes which models
+and platforms carry it
+(<https://support.claude.com/en/articles/16266773-how-claude-marks-ai-generated-content>).
+Not every model the system may use carries it. Detection of that watermark is
+offered by the model provider, not by Complexio. This marker neither depends
+on it nor reports on it.
+
+An email is a container with its own metadata, so marking is done there: a
+signed token in the message headers and in the HTML body, bound to the text
+by its digest.
+
+## Reference implementation
+
+The Python package `ai-disclosure-verify` (import name `ai_disclosure_verify`)
+implements detection and verification only. It runs as:
+
+```
+ai-disclosure-verify MESSAGE.eml [--jwks KEYS.json | --offline] [--json]
+ai-disclosure-verify BODY.html [--jwks KEYS.json | --offline] [--json]
+```
+
+It prints the verdict and what it means in plain language, whether the
+message has content outside the marker, the first violation of
+the markup allowlist and their count, and every marker found
+with its carrier, placement, signature and content results, each with a
+plain-language meaning (for a mismatch: content changed after signing).
+`--json` prints the same report as JSON. Exit status:
+
+| Status | Meaning |
+| --- | --- |
+| 0 | `verified` |
+| 1 | `no_marker` |
+| 2 | The message or key set could not be read (missing file, undecodable charset, malformed JWKS, key set not fetched), or `unparseable` |
+| 3 | `ai_marked_unverified` or `quoted_only` |
+| 4 | `verified_with_unmarked_content` |
+
+By default the key set is fetched over HTTPS from the published location.
+`--jwks` reads it from a local file instead. With `--offline` and no `--jwks`,
+no key set is loaded, so signatures are reported as not checked.
