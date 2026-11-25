@@ -363,18 +363,7 @@ _DOUBLE_DOT = frozenset({"..", ".%2e", "%2e.", "%2e%2e"})
 
 
 def serialise_url(url: str) -> str:
-    """The URL item ``url`` as text-links/2 writes it.
-
-    An http or https URL is written as the WHATWG URL Standard serialises
-    it, for the URLs this handles: scheme and ASCII host in lower case, the
-    default or an empty port dropped, dot segments removed from the path, and
-    userinfo, path, query and fragment percent-encoded with WHATWG's sets
-    (UTF-8; an existing ``%XX`` is kept, so nothing is encoded twice). Any
-    other URL is kept as written: another scheme, a backslash anywhere, a
-    host that is empty, percent-encoded, non-ASCII, punycode (``xn--``), an
-    IP address or ends in a number, or holds anything but ASCII letters,
-    digits, hyphens and dots, and anything WHATWG would refuse to parse.
-    """
+    """WHATWG's serialisation of an http(s) URL the spec covers; any other URL as written."""
     return _serialise_http_url(url) or url
 
 

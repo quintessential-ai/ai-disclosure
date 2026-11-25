@@ -326,16 +326,18 @@ A **strictly valid Safe Links URL**:
 
 - begins with `https://`, compared case-insensitively;
 - its host is the text after `https://` up to the first `/`, `?` or `#`;
-- that host, lowercased, consists of ASCII characters only and fully
-  matches `[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.safelinks\.protection\.outlook\.com`.
+- that host consists of ASCII characters only (tested before lowercasing)
+  and, lowercased, fully matches
+  `[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.safelinks\.protection\.outlook\.com`.
 
 That pattern admits no `\`, `@`, `:`, `%` or non-ASCII character, so a
 backslash, userinfo, a port, a percent-encoded host or an IDNA host all fail
 it, and so does any host a WHATWG parser would read differently. The target
 is the value of the first query parameter named exactly `url` in the query
 (after the first `?`, before any `#`), decoded as
-`application/x-www-form-urlencoded`. A URL that is not strictly valid is
-hashed as it is.
+`application/x-www-form-urlencoded`. A wrapper that is not strictly valid
+is not unwrapped: it stays the URL, and is then written as the
+canonicalisation writes any URL.
 
 ### URL serialisation (`text-links/2`)
 
