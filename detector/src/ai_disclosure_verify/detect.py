@@ -544,7 +544,7 @@ def _claims_error(header: Mapping[str, Any], claims: Mapping[str, Any]) -> str |
 
 def _check_content(claims: Mapping[str, Any], scan: DocumentScan) -> ContentCheck:
     canon = claims.get("canon")
-    if canon not in MESSAGE_CANONICALISATIONS:
+    if not isinstance(canon, str) or canon not in MESSAGE_CANONICALISATIONS:
         return ContentCheck.UNSUPPORTED
     region = scan.regions.get(str(claims.get("mid", "")))
     if region is None:

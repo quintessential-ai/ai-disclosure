@@ -353,14 +353,16 @@ A URL is **kept as written** when any of these holds:
 - it contains a `\` anywhere (WHATWG reads it as `/` in some places and not
   in others);
 - its host (the authority after the last `@`, up to the first `:`) is empty,
-  contains a non-ASCII character, or, lowercased and without one trailing
-  `.`, is not a sequence of `.`-separated labels each matching `[a-z0-9-]+`.
+  contains a non-ASCII character (test this before lowercasing: Unicode
+  lowercases U+212A KELVIN SIGN to `k`), or, lowercased and without one
+  trailing `.`, is not a sequence of `.`-separated labels each matching
+  `[a-z0-9-]+`.
   This keeps percent-encoded hosts, IDNA and IPv6 hosts and empty labels;
 - the last label is all ASCII digits or `0x` followed by hex digits (an IPv4
   address, which WHATWG rewrites, or a host it refuses), or any label begins
   with `xn--` (punycode, which WHATWG validates);
-- the port (after that `:`) is not empty and is not all ASCII digits, or is
-  larger than 65535;
+- the port (after that `:`) is not empty and is not all ASCII digits, or its
+  value is larger than 65535 (leading zeros, however many, do not count);
 - a code point in it has no UTF-8 encoding (a lone surrogate).
 
 Otherwise it is written as:

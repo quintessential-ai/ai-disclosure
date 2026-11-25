@@ -114,7 +114,7 @@
       "first_violation": null
     },
     {
-      "name": "url_no_case_fold_no_decode",
+      "name": "url_scheme_host_folded_escapes_kept",
       "html": "<a href=\"HTTPS://X.Test/%7euser/%41\">x</a>",
       "balanced": "<a href=\"HTTPS://X.Test/%7euser/%41\">x</a>",
       "canonical": "\u001ehttps://x.test/%7euser/%41\u001fx",

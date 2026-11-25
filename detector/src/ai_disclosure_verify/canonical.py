@@ -389,15 +389,24 @@ def _serialise_http_url(url: str) -> str | None:
     authority, rest = match.group(2), match.group(3)
     userinfo, at, host_port = authority.rpartition("@")
     host, colon, port_text = host_port.partition(":")
+    # ASCII before lower case: str.lower maps some non-ASCII letters to ASCII
+    # ones (KELVIN SIGN to "k"), and a non-ASCII host is kept as written.
+    if not host or not host.isascii():
+        return None
     host = host.lower()
-    if not host or not host.isascii() or not _host_handled(host):
+    if not _host_handled(host):
         return None
     port = ""
     if colon and port_text:
-        if not port_text.isascii() or not port_text.isdigit() or int(port_text) > 65535:
+        if not port_text.isascii() or not port_text.isdigit():
             return None
-        if int(port_text) != _DEFAULT_PORTS[scheme]:
-            port = f":{int(port_text)}"
+        # WHATWG allows any number of leading zeros; past them, more than five
+        # digits is out of range, and int() refuses a very long digit string.
+        digits = port_text.lstrip("0") or "0"
+        if len(digits) > 5 or int(digits) > 65535:
+            return None
+        if int(digits) != _DEFAULT_PORTS[scheme]:
+            port = f":{int(digits)}"
     rest, hash_sign, fragment = rest.partition("#")
     path, question, query = rest.partition("?")
     try:
