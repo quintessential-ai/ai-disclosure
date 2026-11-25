@@ -1,6 +1,6 @@
 # Generated from the reference implementation. Do not edit by hand:
 # changes are made there and regenerated.
-"""Canonical content and the markup allowlist (``text-links/1``).
+"""Canonical content and the markup allowlist (``text-links/2``).
 
 The digest binds a marker to what a recipient reads and what the message
 links to or loads, not to the markup carrying it: mail servers and clients
@@ -41,7 +41,12 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
     from xml.etree.ElementTree import Element
 
-CANONICALISATION = "text-links/1"
+# The canonicalisation the issuer signs messages under. A detector also
+# accepts text-links/1, which keeps each URL as written; text-links/2 writes
+# each http and https URL in its WHATWG serialisation (``serialise_url``).
+CANONICALISATION = "text-links/2"
+CANONICALISATION_V1 = "text-links/1"
+MESSAGE_CANONICALISATIONS = frozenset({CANONICALISATION_V1, CANONICALISATION})
 
 CONTENT_ATTR = "data-ai-content"
 MARKER_ATTR = "data-ai-disclosure"
@@ -312,6 +317,147 @@ def normalise_url(value: str) -> str:
     if target is not None:
         url = _preprocess_url(target)
     return _CONTROLS.sub(lambda m: f"%{ord(m.group()):02X}", url)
+
+
+# ---------------------------------------------------------------------------
+# text-links/2: URL serialisation
+# ---------------------------------------------------------------------------
+
+_URL_ITEM = re.compile(
+    f"{URL_OPEN}([^{ATTRIBUTE_TEXT_OPEN}{URL_OPEN}{ITEM_CLOSE}]*){ITEM_CLOSE}"
+)
+
+
+def canonical_as(canonical: str, canon: str) -> str:
+    """The text-links/1 form ``canonical`` rewritten as ``canon`` reads it.
+
+    The two differ only in URL items, which the stream delimits
+    unambiguously, so text-links/2 rewrites each one through ``serialise_url``.
+    """
+    if canon == CANONICALISATION_V1:
+        return canonical
+    if canon != CANONICALISATION:
+        msg = f"unsupported canonicalisation {canon!r}"
+        raise ValueError(msg)
+    return _URL_ITEM.sub(
+        lambda m: f"{URL_OPEN}{serialise_url(m.group(1))}{ITEM_CLOSE}", canonical
+    )
+
+
+# WHATWG percent-encode sets, minus the C0 control set (code points below
+# U+0020 or above U+007E), which ``_percent_encode`` always applies.
+_FRAGMENT_SET = frozenset(' "<>`')
+_QUERY_SET = frozenset(' "#<>')
+_SPECIAL_QUERY_SET = _QUERY_SET | {"'"}
+_PATH_SET = _QUERY_SET | frozenset("?^`{}")
+_USERINFO_SET = _PATH_SET | frozenset("/:;=@[\\]^|")
+
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+_SPECIAL_AUTHORITY = re.compile(
+    r"([A-Za-z][A-Za-z0-9+.\-]*)://([^/?#]*)(.*)\Z", re.DOTALL
+)
+_HOST_LABEL = re.compile(r"[a-z0-9-]+\Z")
+_NUMERIC_LABEL = re.compile(r"[0-9]+\Z|0[xX][0-9A-Fa-f]*\Z")
+_SINGLE_DOT = frozenset({".", "%2e"})
+_DOUBLE_DOT = frozenset({"..", ".%2e", "%2e.", "%2e%2e"})
+
+
+def serialise_url(url: str) -> str:
+    """The URL item ``url`` as text-links/2 writes it.
+
+    An http or https URL is written as the WHATWG URL Standard serialises
+    it, for the URLs this handles: scheme and ASCII host in lower case, the
+    default or an empty port dropped, dot segments removed from the path, and
+    userinfo, path, query and fragment percent-encoded with WHATWG's sets
+    (UTF-8; an existing ``%XX`` is kept, so nothing is encoded twice). Any
+    other URL is kept as written: another scheme, a backslash anywhere, a
+    host that is empty, percent-encoded, non-ASCII, punycode (``xn--``), an
+    IP address or ends in a number, or holds anything but ASCII letters,
+    digits, hyphens and dots, and anything WHATWG would refuse to parse.
+    """
+    return _serialise_http_url(url) or url
+
+
+def _serialise_http_url(url: str) -> str | None:
+    """WHATWG's serialisation of an http(s) URL this handles, else None."""
+    match = _SPECIAL_AUTHORITY.match(url)
+    if match is None or "\\" in url:
+        return None
+    scheme = match.group(1).lower()
+    if scheme not in _DEFAULT_PORTS:
+        return None
+    authority, rest = match.group(2), match.group(3)
+    userinfo, at, host_port = authority.rpartition("@")
+    host, colon, port_text = host_port.partition(":")
+    host = host.lower()
+    if not host or not host.isascii() or not _host_handled(host):
+        return None
+    port = ""
+    if colon and port_text:
+        if not port_text.isascii() or not port_text.isdigit() or int(port_text) > 65535:
+            return None
+        if int(port_text) != _DEFAULT_PORTS[scheme]:
+            port = f":{int(port_text)}"
+    rest, hash_sign, fragment = rest.partition("#")
+    path, question, query = rest.partition("?")
+    try:
+        credentials = ""
+        if at:
+            user, _, password = userinfo.partition(":")
+            user = _percent_encode(user, _USERINFO_SET)
+            password = _percent_encode(password, _USERINFO_SET)
+            if user or password:
+                credentials = f"{user}:{password}@" if password else f"{user}@"
+        serialised = (
+            f"{scheme}://{credentials}{host}{port}{_serialise_path(path)}"
+            + (f"?{_percent_encode(query, _SPECIAL_QUERY_SET)}" if question else "")
+            + (f"#{_percent_encode(fragment, _FRAGMENT_SET)}" if hash_sign else "")
+        )
+    except UnicodeEncodeError:  # a lone surrogate has no UTF-8 form
+        return None
+    return serialised
+
+
+def _host_handled(host: str) -> bool:
+    """A lower-case ASCII domain WHATWG keeps as it is, else False."""
+    labels = host.split(".")
+    if labels[-1] == "" and len(labels) > 1:
+        labels = labels[:-1]
+    if _NUMERIC_LABEL.match(labels[-1]):
+        return False  # an IPv4 address, or one WHATWG refuses
+    return all(
+        _HOST_LABEL.match(label) and not label.startswith("xn--") for label in labels
+    )
+
+
+def _serialise_path(path: str) -> str:
+    """WHATWG's path of a special URL: dot segments resolved, percent-encoded."""
+    segments = path[1:].split("/") if path else [""]
+    out: list[str] = []
+    for index, raw in enumerate(segments):
+        segment = _percent_encode(raw, _PATH_SET)
+        last = index == len(segments) - 1
+        if segment.lower() in _DOUBLE_DOT:
+            if out:
+                out.pop()
+            if last:
+                out.append("")
+        elif segment.lower() in _SINGLE_DOT:
+            if last:
+                out.append("")
+        else:
+            out.append(segment)
+    return "/" + "/".join(out)
+
+
+def _percent_encode(text: str, extra: frozenset[str]) -> str:
+    """``text`` with the C0 control set and ``extra`` percent-encoded as UTF-8."""
+    return "".join(
+        "".join(f"%{byte:02X}" for byte in char.encode("utf-8"))
+        if not " " < char < "\x7f" or char in extra
+        else char
+        for char in text
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -30,10 +30,11 @@ from xml.etree import ElementTree
 from defusedxml.common import DefusedXmlException
 
 from ai_disclosure_verify.canonical import (
-    CANONICALISATION,
+    MESSAGE_CANONICALISATIONS,
     ContentRegion,
     DocumentScan,
     UnparseableHtmlError,
+    canonical_as,
     digest_of_canonical,
     scan_html,
 )
@@ -542,12 +543,14 @@ def _claims_error(header: Mapping[str, Any], claims: Mapping[str, Any]) -> str |
 
 
 def _check_content(claims: Mapping[str, Any], scan: DocumentScan) -> ContentCheck:
-    if claims.get("canon") != CANONICALISATION:
+    canon = claims.get("canon")
+    if canon not in MESSAGE_CANONICALISATIONS:
         return ContentCheck.UNSUPPORTED
     region = scan.regions.get(str(claims.get("mid", "")))
     if region is None:
         return ContentCheck.NOT_FOUND
-    if digest_of_canonical(region.canonical) == claims.get("content_sha256"):
+    canonical = canonical_as(region.canonical, str(canon))
+    if digest_of_canonical(canonical) == claims.get("content_sha256"):
         return ContentCheck.MATCH
     return ContentCheck.MISMATCH
 

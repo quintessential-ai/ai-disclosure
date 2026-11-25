@@ -147,7 +147,7 @@ No other header members are used. A token carrying `crit` is invalid.
 | `on_behalf_of` | string | The entity the message is sent on behalf of (the deploying organisation) |
 | `iat` | integer | Issue time, seconds since the Unix epoch (UTC) |
 | `mid` | string | Marker id: 32 lowercase hex characters, random per message |
-| `canon` | string | Canonicalisation used for `content_sha256`: `text-links/1` for messages, `ooxml-parts/1` or `pdf-revision/1` for files |
+| `canon` | string | Canonicalisation used for `content_sha256`: `text-links/2` for messages (a verifier also accepts `text-links/1`), `ooxml-parts/1` or `pdf-revision/1` for files |
 | `content_sha256` | string | Unpadded base64url SHA-256 of the canonical content (below) |
 
 Example payload:
@@ -155,7 +155,7 @@ Example payload:
 ```json
 {
   "ai_generated": true,
-  "canon": "text-links/1",
+  "canon": "text-links/2",
   "content_sha256": "HqtrRXPLKxZ03i6kBAueIa4X0NLwjEX93dU6OW9gkJU",
   "generator": "Complexio Enterprise Automator",
   "iat": 1794238106,
@@ -246,14 +246,21 @@ A violation is *inside* when it sits within the original's content
 container (the container's own extra attributes included), and *outside*
 otherwise.
 
-## Canonical content (`text-links/1`)
+## Canonical content (`text-links/2`)
 
 The digest covers what a recipient reads and what the message links to or
 loads: the text, the target of every link and image, and the text of link
 titles and image descriptions. It does not cover markup, so it survives the
-rewriting mail servers and clients apply to HTML. Nothing signed with an
-earlier definition of `text-links/1` was ever sent, so the identifier is kept
-for this definition.
+rewriting mail servers and clients apply to HTML.
+
+`text-links/2` and `text-links/1` differ only in how a URL item is written
+(step 4 of [URL items](#url-items)). `text-links/1` keeps each URL as written,
+so a link whose spaces a mail server re-encodes as `%20` no longer matches;
+`text-links/2` writes http and https URLs in their WHATWG serialisation, which
+such re-encoding does not change. Issuers sign `text-links/2`. A verifier
+accepts both and reads each marker under the canonicalisation it names.
+Nothing signed with an earlier definition of `text-links/1` was ever sent, so
+that identifier names the definition here.
 
 ### Parsing
 
@@ -306,8 +313,12 @@ A URL value is normalised before it enters the stream:
 2. if it is a strictly valid Safe Links URL (below), replace it with the
    target it carries and apply step 1 to the target;
 3. percent-encode each remaining U+0000–U+001F and U+007F as `%XX`
-   (uppercase hex). Nothing else: no case folding, no percent-decoding, no
-   resolving against a base URL, no Unicode normalisation.
+   (uppercase hex);
+4. under `text-links/2` only, replace an http or https URL with its
+   serialisation as given in [URL serialisation](#url-serialisation-text-links2).
+   Under `text-links/1`, and for any URL that section keeps as written,
+   nothing else changes: no case folding, no percent-decoding, no resolving
+   against a base URL, no Unicode normalisation.
 
 An empty value contributes nothing.
 
@@ -325,6 +336,73 @@ is the value of the first query parameter named exactly `url` in the query
 (after the first `?`, before any `#`), decoded as
 `application/x-www-form-urlencoded`. A URL that is not strictly valid is
 hashed as it is.
+
+### URL serialisation (`text-links/2`)
+
+This is the WHATWG URL Standard's serialisation (the `href` its parser gives)
+for the http and https URLs it covers, written out so a verifier needs no URL
+library. A URL it does not cover is kept as it is after step 3. The
+reference implementation is checked against WHATWG's own URL test data: every
+http or https input it serialises gives WHATWG's `href`.
+
+A URL is **kept as written** when any of these holds:
+
+- it does not match `([A-Za-z][A-Za-z0-9+.-]*)://([^/?#]*)(.*)` in full, or
+  its scheme, lowercased, is neither `http` nor `https` (so `mailto:`,
+  `tel:`, `http:host` and `http:/host` are kept);
+- it contains a `\` anywhere (WHATWG reads it as `/` in some places and not
+  in others);
+- its host (the authority after the last `@`, up to the first `:`) is empty,
+  contains a non-ASCII character, or, lowercased and without one trailing
+  `.`, is not a sequence of `.`-separated labels each matching `[a-z0-9-]+`.
+  This keeps percent-encoded hosts, IDNA and IPv6 hosts and empty labels;
+- the last label is all ASCII digits or `0x` followed by hex digits (an IPv4
+  address, which WHATWG rewrites, or a host it refuses), or any label begins
+  with `xn--` (punycode, which WHATWG validates);
+- the port (after that `:`) is not empty and is not all ASCII digits, or is
+  larger than 65535;
+- a code point in it has no UTF-8 encoding (a lone surrogate).
+
+Otherwise it is written as:
+
+1. the scheme, lowercased, then `://`;
+2. if the authority contains `@`: the text before its last `@` is the
+   userinfo; split it at its first `:` into username and password, and
+   percent-encode both with the *userinfo set*. Write `username@`, or
+   `username:password@` when the password is not empty; write nothing when
+   both are empty;
+3. the host, lowercased (a trailing `.` is kept);
+4. the port, when it is not empty and its value differs from the scheme's
+   default (80 for http, 443 for https), as `:` and its value in decimal
+   without leading zeros;
+5. the path: the text from the end of the authority up to the first `?` or
+   `#`. Split it after its leading `/` (an empty path is one empty segment)
+   at each `/`, percent-encode each segment with the *path set*, and resolve
+   them in order: a segment that is `..`, `.%2e`, `%2e.` or `%2e%2e`
+   (case-insensitively) removes the last kept segment, if any; one that is
+   `.` or `%2e` is dropped; any other is kept. When the final segment is a
+   dot segment, an empty segment is kept after it. Write `/` and the kept
+   segments joined by `/`;
+6. if there is a `?` before any `#`: `?` and the text up to the `#`,
+   percent-encoded with the *query set*;
+7. if there is a `#`: `#` and the rest, percent-encoded with the
+   *fragment set*.
+
+Percent-encoding with a set writes each code point that is below U+0021,
+above U+007E, or in the set as the `%XX` (uppercase hex) of each byte of its
+UTF-8 encoding, and every other code point as it is. An existing `%XX` is
+not decoded, so nothing is encoded twice. The sets (WHATWG's for special
+URLs):
+
+- fragment set: space, `"`, `<`, `>`, `` ` ``;
+- query set: space, `"`, `#`, `<`, `>`, `'`;
+- path set: space, `"`, `#`, `<`, `>`, `?`, `^`, `` ` ``, `{`, `}`;
+- userinfo set: the path set and `/`, `:`, `;`, `=`, `@`, `[`, `\`, `]`,
+  `|`.
+
+For example, `HTTPS://X.SharePoint.com/Shared Documents/Q3 report.pdf` is
+written `https://x.sharepoint.com/Shared%20Documents/Q3%20report.pdf`, the
+same as the `%20` form a mail server sends on.
 
 ### Canonical string
 
@@ -374,10 +452,12 @@ target, image source, link title or image description changes it.
    published key set (below) and verify the Ed25519 signature over the JWS
    signing input. Outcomes: valid, invalid, unknown key, or unsigned.
 5. Check the content: find the content container with the token's `mid`,
-   compute its canonical digest and compare it with `content_sha256`.
-   Outcomes: match; mismatch, meaning the content changed after signing (a
-   person edited it, or a system in transit altered its text, links or
-   images); or not found (the container did not survive transport).
+   compute its canonical digest under the token's `canon` (`text-links/2` or
+   `text-links/1`; any other value is unsupported) and compare it with
+   `content_sha256`. Outcomes: match; mismatch, meaning the content changed
+   after signing (a person edited it, or a system in transit altered its
+   text, links or images); unsupported; or not found (the container did not
+   survive transport).
 6. Decide which marker is the message's own, on the parsed tree. A content
    container *leads* the message when, walking the whole document (head
    included) as in [Walk](#walk), no URL item and no text item with a
@@ -518,10 +598,11 @@ not change when keys are added or retired.
 ## Versioning
 
 The `spec` claim names the version. A change a version-1 verifier would
-misread (a new required claim, a changed meaning, a new canonicalisation)
-gets a new version; verifiers report a token with an unknown `spec` rather
-than trusting it. A new canonicalisation gets a new `canon` value, so a
-verifier can say it does not support it instead of reporting a mismatch.
+misread (a new required claim, a changed meaning) gets a new version;
+verifiers report a token with an unknown `spec` rather than trusting it. A
+new canonicalisation gets a new `canon` value instead, so a verifier that
+does not know it says it does not support it rather than reporting a
+mismatch (`text-links/2` was added this way).
 
 ## Transport limits
 

@@ -65,7 +65,9 @@ def golden_token(claims: dict[str, Any]) -> str:
     return f"{signing_input}.{_b64url(signature)}"
 
 
-def signed_vector_claims(vector: dict[str, Any]) -> dict[str, Any]:
+def signed_vector_claims(
+    vector: dict[str, Any], canon: str = "text-links/2"
+) -> dict[str, Any]:
     expected = vector["expected"]
     return {
         "spec": "complexio-ai-disclosure/1",
@@ -74,14 +76,16 @@ def signed_vector_claims(vector: dict[str, Any]) -> dict[str, Any]:
         "on_behalf_of": "the company",
         "iat": 1794238200,
         "mid": vector["input"]["mid"],
-        "canon": "text-links/1",
+        "canon": canon,
         "content_sha256": expected["content_sha256"],
     }
 
 
-def signed_vector_body(vector: dict[str, Any]) -> tuple[str, str]:
+def signed_vector_body(
+    vector: dict[str, Any], canon: str = "text-links/2"
+) -> tuple[str, str]:
     """The HTML body and the token of a ``signed_as_written`` vector."""
-    token = golden_token(signed_vector_claims(vector))
+    token = golden_token(signed_vector_claims(vector, canon))
     marker = (
         f'<div data-ai-disclosure="{token}" style="display:none" '
         'aria-hidden="true"></div>'

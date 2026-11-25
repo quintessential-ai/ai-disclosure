@@ -11,7 +11,9 @@ from helpers import GOLDEN_KID, VECTORS, golden_public_key, signed_vector_body
 from ai_disclosure_verify import ContentCheck, SignatureStatus, Verdict, detect_html
 from ai_disclosure_verify.canonical import (
     CANONICALISATION,
+    CANONICALISATION_V1,
     CONTENT_ATTR,
+    canonical_as,
     digest_of_canonical,
     scan_html,
 )
@@ -36,7 +38,7 @@ def test_canonical_vector(canonical: dict[str, Any]) -> None:
     container = f'<div {CONTENT_ATTR}="{MID}">{canonical["balanced"]}</div>'
     scan = scan_html(container)
 
-    region_canonical = scan.regions[MID].canonical
+    region_canonical = canonical_as(scan.regions[MID].canonical, CANONICALISATION)
     located = (v.located(MID) for v in scan.violations)
     first_violation = next((n for n in located if n.startswith("inside:")), None)
 
@@ -56,7 +58,9 @@ def test_label_vector_reads_as_marked_but_unsigned(label: dict[str, Any]) -> Non
     assert finding.content is ContentCheck.MATCH
     assert finding.claims["mid"] == mid
     assert finding.claims["content_sha256"] == expected["content_sha256"]
-    canonical = scan_html(expected["html_body"]).regions[mid].canonical
+    canonical = canonical_as(
+        scan_html(expected["html_body"]).regions[mid].canonical, CANONICALISATION
+    )
     assert canonical == expected["canonical"]
     assert digest_of_canonical(canonical) == expected["content_sha256"]
 
@@ -76,7 +80,8 @@ def test_signed_vector_verifies_to_the_expected_verdict(
     assert report.verdict.value == expected["verdict"]
     markup = report.disallowed_markup
     assert (markup.first if markup else None) == expected["first_violation"]
-    canonical = scan_html(body).regions[signed_as_written["input"]["mid"]].canonical
+    region = scan_html(body).regions[signed_as_written["input"]["mid"]]
+    canonical = canonical_as(region.canonical, CANONICALISATION)
     assert canonical == expected["canonical"]
     assert token.count(".") == 2
 
@@ -100,3 +105,23 @@ def test_altered_content_does_not_verify(vectors: dict[str, Any]) -> None:
 
     assert report.verdict is Verdict.UNVERIFIED
     assert report.findings[0].content is ContentCheck.MISMATCH
+
+
+def test_a_text_links_1_token_still_verifies(vectors: dict[str, Any]) -> None:
+    """A verifier reads each token under the canonicalisation it names."""
+    vector = vectors["signed_as_written"][0]
+    body, _ = signed_vector_body(vector, CANONICALISATION_V1)
+
+    report = detect_html(body, {GOLDEN_KID: golden_public_key()})
+
+    (finding,) = report.findings
+    assert finding.signature is SignatureStatus.VALID
+    assert finding.content.value == vector["expected"]["content"]
+
+
+def test_an_unknown_canonicalisation_is_unsupported(vectors: dict[str, Any]) -> None:
+    body, _ = signed_vector_body(vectors["signed_as_written"][0], "text-links/9")
+
+    (finding,) = detect_html(body, {GOLDEN_KID: golden_public_key()}).findings
+
+    assert finding.content is ContentCheck.UNSUPPORTED
