@@ -259,8 +259,6 @@ so a link whose spaces a mail server re-encodes as `%20` no longer matches;
 `text-links/2` writes http and https URLs in their WHATWG serialisation, which
 such re-encoding does not change. Issuers sign `text-links/2`. A verifier
 accepts both and reads each marker under the canonicalisation it names.
-Nothing signed with an earlier definition of `text-links/1` was ever sent, so
-that identifier names the definition here.
 
 ### Parsing
 
@@ -606,7 +604,7 @@ misread (a new required claim, a changed meaning) gets a new version;
 verifiers report a token with an unknown `spec` rather than trusting it. A
 new canonicalisation gets a new `canon` value instead, so a verifier that
 does not know it says it does not support it rather than reporting a
-mismatch (`text-links/2` was added this way).
+mismatch.
 
 ## Transport limits
 

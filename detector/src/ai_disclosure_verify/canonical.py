@@ -5,8 +5,10 @@
 The digest binds a marker to what a recipient reads and what the message
 links to or loads, not to the markup carrying it: mail servers and clients
 rewrite HTML, re-wrap lines and swap spaces for ``&nbsp;``. Text keeps its
-characters but loses its whitespace; each link and image URL keeps its
-characters and enters the stream where its element starts.
+characters but loses its whitespace; each link and image URL enters the
+stream where its element starts. The walk writes a URL as ``text-links/1``
+does (as written); ``canonical_as`` rewrites that stream into the form a
+marker's ``canon`` names, which for ``text-links/2`` serialises http(s) URLs.
 
 What may carry that content is a fixed allowlist of elements, attributes and
 URL schemes. Anything else (CSS, comments, foreign content, forms, embedded
