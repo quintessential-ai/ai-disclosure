@@ -539,8 +539,8 @@ target, image source, link title or image description changes it.
    exception is the plain-text alternative to the HTML body: a `text/plain`
    part that is a direct child of a `multipart/alternative` part holding the
    HTML body, directly or inside another part (Outlook puts the HTML in a
-   `multipart/related`). Mail clients show the HTML, and Exchange adds a
-   generated plain-text alternative to most mail, so a plain-text
+   `multipart/related`). Most mail clients show the HTML, and Exchange adds
+   a generated plain-text alternative to many messages, so a plain-text
    alternative to the HTML body is not checked: it may say something else
    (see [Transport limits](#transport-limits)). An attachment is a file of
    its own: the marker does not cover it, and it does not change the
@@ -723,9 +723,9 @@ mismatch.
   spans: an anchor can be stretched over neighbouring visible text, or
   shrunk, without changing the digest.
 - A plain-text alternative to the HTML body is not checked (step 7 of
-  [Verifying a message](#verifying-a-message)). Mail clients show the HTML,
-  and Exchange adds a plain-text alternative written from the HTML to most
-  mail. That part can say something else: a reader whose client shows
+  [Verifying a message](#verifying-a-message)). Most mail clients show the
+  HTML, and Exchange adds a plain-text alternative written from the HTML to
+  many messages. That part can say something else: a reader whose client shows
   plain text, or a program that reads it, sees words the marker does not
   vouch for, and the verdict can still be `verified`.
 - Exchange and Outlook may rewrite a message's HTML in transit or on reply.
