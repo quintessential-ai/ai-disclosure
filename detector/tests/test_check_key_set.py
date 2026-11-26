@@ -1,0 +1,102 @@
+"""The key set check CI runs on every pull request."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import pytest
+from check_key_set import DEFAULT_PATH, main
+from helpers import golden_jwks, golden_public_key
+
+from ai_disclosure_verify.jws import jwk_thumbprint
+
+
+def good_entry() -> dict[str, Any]:
+    entry = golden_jwks()["keys"][0]
+    entry["kid"] = jwk_thumbprint(golden_public_key())
+    return entry
+
+
+def run(tmp_path: Path, document: object, capsys: pytest.CaptureFixture[str]):
+    path = tmp_path / "jwks.json"
+    path.write_text(
+        document if isinstance(document, str) else json.dumps(document),
+        encoding="utf-8",
+    )
+    code = main(["check_key_set", str(path)])
+    return code, capsys.readouterr()
+
+
+def test_published_key_set_passes(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["check_key_set", str(DEFAULT_PATH)]) == 0
+    assert "ok" in capsys.readouterr().out
+
+
+def test_empty_key_set_passes(tmp_path: Path, capsys) -> None:
+    assert run(tmp_path, {"keys": []}, capsys)[0] == 0
+
+
+def test_good_key_passes(tmp_path: Path, capsys) -> None:
+    code, out = run(tmp_path, {"keys": [good_entry()]}, capsys)
+    assert code == 0, out.err
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"d": "AAAA"}, "private 'd'"),
+        ({"kid": "golden-vectors"}, "RFC 7638"),
+        ({"use": "enc"}, "'use'"),
+        ({"alg": "RS256"}, "'alg'"),
+    ],
+)
+def test_bad_key_fails_naming_it(
+    tmp_path: Path, capsys, change: dict[str, str], message: str
+) -> None:
+    entry = good_entry() | change
+    code, out = run(tmp_path, {"keys": [entry]}, capsys)
+    assert code == 1
+    assert message in out.err
+    assert f"key 0 (kid {entry['kid']!r})" in out.err
+
+
+def test_missing_use_and_alg_fail(tmp_path: Path, capsys) -> None:
+    entry = good_entry()
+    del entry["use"], entry["alg"]
+    code, out = run(tmp_path, {"keys": [entry]}, capsys)
+    assert code == 1
+    assert "'use'" in out.err
+    assert "'alg'" in out.err
+
+
+def test_duplicate_kid_fails(tmp_path: Path, capsys) -> None:
+    code, out = run(tmp_path, {"keys": [good_entry(), good_entry()]}, capsys)
+    assert code == 1
+    assert "duplicate kid" in out.err
+
+
+def test_non_ed25519_entry_fails(tmp_path: Path, capsys) -> None:
+    entry = {"kty": "RSA", "kid": "x", "n": "AQAB", "e": "AQAB"}
+    code, out = run(tmp_path, {"keys": [entry]}, capsys)
+    assert code == 1
+    assert "not an Ed25519" in out.err
+
+
+def test_wrong_x_fails(tmp_path: Path, capsys) -> None:
+    code, out = run(tmp_path, {"keys": [good_entry() | {"x": "AAAA"}]}, capsys)
+    assert code == 1
+    assert "'x'" in out.err
+
+
+def test_invalid_json_fails(tmp_path: Path, capsys) -> None:
+    code, out = run(tmp_path, '{"keys": [', capsys)
+    assert code == 1
+    assert "not valid JSON" in out.err
+
+
+def test_not_a_jwks_fails(tmp_path: Path, capsys) -> None:
+    code, out = run(tmp_path, [1], capsys)
+    assert code == 1
+    assert '"keys" array' in out.err

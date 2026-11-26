@@ -3,7 +3,10 @@
 `public/.well-known/ai-disclosure-jwks.json` is the public key set detectors use to check our
 signed AI-disclosure markers. It is served at
 <https://ai-disclosure.complexio.com/.well-known/ai-disclosure-jwks.json>. It changes only
-through a reviewed pull request to this repository, approved by a code owner.
+through a reviewed pull request to this repository, approved by a code owner. The `Checks`
+workflow runs on every pull request and fails it if the file is not valid JWKS, a key carries a
+private `d` member, a `kid` is not the key's RFC 7638 thumbprint, a `kid` repeats, or `use` or
+`alg` is not `sig` or `EdDSA`.
 
 ## Adding a deployment's key, before its first signed mail
 
