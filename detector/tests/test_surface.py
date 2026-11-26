@@ -113,7 +113,8 @@ def _run(tmp_path: Path, data: bytes, *args: str) -> int:
 # ---------------------------------------------------------------------------
 
 
-def test_deeply_nested_office_xml_is_a_decode_error(tmp_path: Path) -> None:
+def test_deeply_nested_office_xml_keeps_the_marker(tmp_path: Path) -> None:
+    """Routing XML too deep to serialise: the marker is found, its content is not."""
     docx = (FIXTURES / "signed.docx").read_bytes()
     deep = (
         b'<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
@@ -123,9 +124,13 @@ def test_deeply_nested_office_xml_is_a_decode_error(tmp_path: Path) -> None:
     )
     package = _repack(docx, "[Content_Types].xml", deep)
 
-    with pytest.raises(MessageDecodeError, match="nested too deeply"):
-        detect_file(package, KEYS)
-    assert _run(tmp_path, package) == cli.EXIT_ERROR
+    report = detect_file(package, KEYS)
+
+    assert report.verdict is Verdict.UNVERIFIED
+    (finding,) = report.findings
+    assert finding.signature is SignatureStatus.VALID
+    assert finding.content is ContentCheck.NOT_FOUND
+    assert _run(tmp_path, package) == cli.EXIT_UNVERIFIED
 
 
 def _nested_multipart(depth: int) -> bytes:
@@ -178,16 +183,96 @@ def test_a_plain_text_alternative_with_the_signed_words_keeps_verified(
     assert not report.unmarked_content
 
 
-def test_a_differing_plain_text_alternative_is_unmarked_content(
+def test_a_differing_plain_text_alternative_is_not_checked(
     signed: tuple[str, str],
 ) -> None:
+    """The documented caveat: mail clients show the HTML, not this part."""
     body, token = signed
     plain = _plain_of(body).replace("Friday", "Monday")
+    assert plain != _plain_of(body)
     message = _eml(body, token, plain=plain)
 
     report = detect_message(bytes(message), KEYS)
 
+    assert not report.unmarked_content
+    assert report.verdict is Verdict.VERIFIED
+
+
+def test_a_plain_text_alternative_beside_a_related_html_part_is_not_checked(
+    signed: tuple[str, str],
+) -> None:
+    """Outlook's shape: the HTML sits in multipart/related inside the alternative."""
+    body, token = signed
+    message = _eml(body, token, plain="Something else entirely.")
+    _, html = message.iter_parts()
+    html.make_related()
+
+    report = detect_message(bytes(message), KEYS)
+
+    assert html.get_content_type() == "multipart/related"
+    assert report.verdict is Verdict.VERIFIED
+
+
+def test_a_plain_text_part_outside_the_alternative_is_unmarked_content(
+    signed: tuple[str, str],
+) -> None:
+    body, token = signed
+    message = _eml(body, token, plain=_plain_of(body))
+    message.make_mixed()
+    extra = EmailMessage()
+    extra.set_content("Send the money to IBAN XX99 instead.")
+    extra["Content-Disposition"] = "inline"
+    message.attach(extra)
+
+    report = detect_message(bytes(message), KEYS)
+
     assert report.unmarked_content
+    assert report.verdict is Verdict.VERIFIED_WITH_UNMARKED_CONTENT
+
+
+def test_a_plain_text_part_beside_the_html_in_related_is_unmarked_content(
+    signed: tuple[str, str],
+) -> None:
+    """Only a direct child of the alternative is the plain-text alternative."""
+    body, token = signed
+    message = _eml(body, token)
+    message.add_related("Send the money to IBAN XX99 instead.")
+
+    report = detect_message(bytes(message), KEYS)
+
+    assert message.get_content_type() == "multipart/related"
+    assert report.verdict is Verdict.VERIFIED_WITH_UNMARKED_CONTENT
+
+
+def test_a_plain_text_alternative_to_another_part_is_unmarked_content(
+    signed: tuple[str, str],
+) -> None:
+    """Only the alternative that holds the HTML body is passed over."""
+    body, token = signed
+    message = _eml(body, token, plain=_plain_of(body))
+    message.make_mixed()
+    extra = EmailMessage()
+    extra.set_content("Send the money to IBAN XX99 instead.")
+    extra.make_alternative()
+    message.attach(extra)
+
+    report = detect_message(bytes(message), KEYS)
+
+    assert extra.get_content_type() == "multipart/alternative"
+    assert report.verdict is Verdict.VERIFIED_WITH_UNMARKED_CONTENT
+
+
+def test_a_second_html_alternative_is_unmarked_content(
+    signed: tuple[str, str],
+) -> None:
+    body, token = signed
+    message = _eml(body, token, plain=_plain_of(body))
+    message.add_alternative(
+        "<p>Send the money to IBAN XX99 instead</p>", subtype="html"
+    )
+
+    report = detect_message(bytes(message), KEYS)
+
     assert report.verdict is Verdict.VERIFIED_WITH_UNMARKED_CONTENT
 
 
@@ -247,7 +332,7 @@ def test_attachments_are_not_content_of_the_message(signed: tuple[str, str]) -> 
     assert report.verdict is Verdict.VERIFIED
 
 
-def test_an_undecodable_plain_text_part_is_unmarked_content(
+def test_an_undecodable_plain_text_alternative_is_not_read(
     signed: tuple[str, str],
 ) -> None:
     body, token = signed
@@ -257,7 +342,7 @@ def test_an_undecodable_plain_text_part_is_unmarked_content(
 
     report = detect_message(bytes(message), KEYS)
 
-    assert report.verdict is Verdict.VERIFIED_WITH_UNMARKED_CONTENT
+    assert report.verdict is Verdict.VERIFIED
 
 
 def test_other_parts_do_not_matter_without_the_messages_own_marker() -> None:
@@ -273,6 +358,10 @@ def test_other_parts_do_not_matter_without_the_messages_own_marker() -> None:
 
 def test_the_verified_meanings_name_what_they_cover() -> None:
     assert "words and links" in VERDICT_MEANING[Verdict.VERIFIED]
+    assert (
+        "a plain-text alternative to the HTML body is not checked"
+        in VERDICT_MEANING[Verdict.VERIFIED]
+    )
     unmarked = VERDICT_MEANING[Verdict.VERIFIED_WITH_UNMARKED_CONTENT]
     assert "another part of an email" in unmarked
     assert "PDF" in unmarked

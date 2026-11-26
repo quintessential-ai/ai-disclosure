@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import time
 import tracemalloc
+from typing import Any
 
 import pytest
+from helpers import GOLDEN_KID, golden_public_key, signed_vector_body
 
 from ai_disclosure_verify import Verdict, canonical, detect_html
 from ai_disclosure_verify.canonical import (
@@ -15,6 +18,7 @@ from ai_disclosure_verify.canonical import (
     digest_of_canonical,
     scan_html,
 )
+from ai_disclosure_verify.jws import decode_compact
 
 
 def _containers(count: int) -> str:
@@ -172,3 +176,33 @@ def test_a_region_digests_once_per_canonicalisation(
         == digest_of_canonical(canonical_as(region.canonical, CANONICALISATION))
     )
     assert calls == ["canonical"]
+
+
+def test_many_markers_naming_one_large_region_hash_it_once(
+    vectors: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, token = signed_vector_body(vectors["signed_as_written"][0])
+    mid = decode_compact(token).payload["mid"]
+    block = (
+        f'<div data-ai-disclosure="{token}" style="display:none" '
+        'aria-hidden="true"></div>'
+    )
+    document = (
+        f'<div data-ai-content="{mid}"><p>{"word " * 200_000}</p></div>' + block * 127
+    )
+    hashed: list[int] = []
+
+    class CountingHashlib:
+        @staticmethod
+        def sha256(data: bytes) -> Any:
+            hashed.append(len(data))
+            return hashlib.sha256(data)
+
+    monkeypatch.setattr(canonical, "hashlib", CountingHashlib)
+
+    started = time.perf_counter()
+    report = detect_html(document, {GOLDEN_KID: golden_public_key()})
+
+    assert time.perf_counter() - started < 2
+    assert len(report.findings) == 127
+    assert len(hashed) == 1

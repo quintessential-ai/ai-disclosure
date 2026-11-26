@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from helpers import golden_jwks, signed_vector_body
+from helpers import FakeResponse, golden_jwks, signed_vector_body
 
 from ai_disclosure_verify import cli, keys
 
@@ -66,7 +66,7 @@ def test_offline_without_a_key_set_reads_as_marked_but_unverified(
     def no_network(*_: object, **__: object) -> None:
         raise AssertionError("offline must not touch the network")
 
-    monkeypatch.setattr(keys.urllib.request, "urlopen", no_network)
+    monkeypatch.setattr(keys, "urlopen", no_network)
 
     status = cli.main([str(eml), "--offline"])
 
@@ -80,22 +80,12 @@ def test_default_fetches_the_key_set_from_the_constant(
     seen: list[tuple[str, float | None]] = []
     agents: list[str] = []
 
-    class Response:
-        def __enter__(self) -> Response:
-            return self
-
-        def __exit__(self, *_: object) -> None:
-            return None
-
-        def read(self, _: int) -> bytes:
-            return json.dumps(golden_jwks()).encode()
-
-    def fake_urlopen(request: Any, timeout: float | None = None) -> Response:
+    def fake_urlopen(request: Any, timeout: float | None = None) -> FakeResponse:
         seen.append((request.full_url, timeout))
         agents.append(request.get_header("User-agent"))
-        return Response()
+        return FakeResponse(json.dumps(golden_jwks()).encode(), keys.DEFAULT_JWKS_URL)
 
-    monkeypatch.setattr(keys.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(keys, "urlopen", fake_urlopen)
 
     status = cli.main([str(eml), "--timeout", "3"])
 
@@ -112,7 +102,7 @@ def test_unreachable_key_set_is_a_clear_error(
     def refuse(*_: object, **__: object) -> None:
         raise urllib.error.URLError("name resolution failed")
 
-    monkeypatch.setattr(keys.urllib.request, "urlopen", refuse)
+    monkeypatch.setattr(keys, "urlopen", refuse)
 
     status = cli.main([str(eml)])
 
@@ -126,17 +116,9 @@ def test_unreachable_key_set_is_a_clear_error(
 def test_empty_published_key_set_says_so(
     eml: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    class Empty:
-        def __enter__(self) -> Empty:
-            return self
-
-        def __exit__(self, *_: object) -> None:
-            return None
-
-        def read(self, _: int) -> bytes:
-            return b""
-
-    monkeypatch.setattr(keys.urllib.request, "urlopen", lambda *_, **__: Empty())
+    monkeypatch.setattr(
+        keys, "urlopen", lambda *_, **__: FakeResponse(b"", keys.DEFAULT_JWKS_URL)
+    )
 
     status = cli.main([str(eml)])
 
@@ -152,22 +134,23 @@ def test_message_without_a_signed_marker_needs_no_key_set(
     def refuse(*_: object, **__: object) -> None:
         raise AssertionError("no signed marker, no fetch")
 
-    monkeypatch.setattr(keys.urllib.request, "urlopen", refuse)
+    monkeypatch.setattr(keys, "urlopen", refuse)
     path = tmp_path / "plain.html"
     path.write_text("<p>Hello</p>", encoding="utf-8")
 
     assert cli.main([str(path)]) == cli.EXIT_NO_MARKER
 
 
-def test_a_differing_plain_text_part_reads_as_unmarked_content(
+def test_a_differing_plain_text_alternative_is_not_checked(
     eml: Path, jwks_file: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """Mail clients show the HTML; the plain-text alternative is passed over."""
     eml.write_bytes(eml.read_bytes().replace(b"Friday", b"Monday", 1))
 
     status = cli.main([str(eml), "--jwks", str(jwks_file)])
 
-    assert status == cli.EXIT_VERIFIED_WITH_UNMARKED_CONTENT
-    assert "Content outside the marker: yes" in capsys.readouterr().out
+    assert status == cli.EXIT_VERIFIED
+    assert "Content outside the marker: no" in capsys.readouterr().out
 
 
 def test_missing_file_is_an_error(tmp_path: Path) -> None:

@@ -292,7 +292,7 @@ _COMMENT_TOKEN = tokenTypes["Comment"]
 _DOCTYPE_TOKEN = tokenTypes["Doctype"]
 
 
-def _building_length(token: dict[str, Any]) -> int:
+def _building_length(token: Mapping[str, Any]) -> int:
     """Characters in the strings an unfinished token is being built into."""
     kind = token.get("type")
     if kind == _COMMENT_TOKEN:
@@ -608,10 +608,15 @@ class ContentRegion:
 
 @dataclass(frozen=True)
 class BodyMarker:
-    """A ``data-ai-disclosure`` attribute value found in a document."""
+    """A ``data-ai-disclosure`` attribute value found in a document.
+
+    ``leads`` is True when nothing that counts as content comes before the
+    element, and it is neither in a ``blockquote`` nor in a container.
+    """
 
     value: str
     order: int
+    leads: bool = False
 
 
 @dataclass(frozen=True)
@@ -922,7 +927,10 @@ class _Walker:
     ) -> None:
         marker = element.get(MARKER_ATTR)
         if marker:
-            self.markers.append(BodyMarker(value=marker, order=len(self.markers)))
+            leads = not (self._seen_content or self._blockquotes or self._open)
+            self.markers.append(
+                BodyMarker(value=marker, order=len(self.markers), leads=leads)
+            )
         if not html_element:
             return
         if local == "blockquote":

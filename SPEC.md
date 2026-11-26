@@ -485,7 +485,8 @@ target, image source, link title or image description changes it.
    not a version-1 payload: `spec` other than `complexio-ai-disclosure/1`,
    `ai_generated` not `true`, a missing or wrongly typed claim, or a `mid`
    that is not 32 lowercase hex characters. A rejected token is never
-   verified, whatever its signature.
+   verified, whatever its signature. A malformed token (see [Token](#token))
+   is rejected too, and names no container.
 4. Check the signature: find the key whose `kid` matches in Complexio's
    published key set (below) and verify the Ed25519 signature over the JWS
    signing input. Outcomes: valid, invalid, unknown key, or unsigned.
@@ -503,8 +504,17 @@ target, image source, link title or image description changes it.
    inside a `blockquote` nor inside another content container.
    - The original is the first body marker whose container leads the
      message. With a header token, it must also have the header's `mid`.
+   - When no container leads, the first body marker whose container is
+     missing and whose hidden block itself leads the message, by the same
+     test, is the original, with the same condition on the header's `mid`:
+     its container was removed in transit, and its content result is "not
+     found".
    - A header token whose container does not lead the message is not the
-     message's own content: its content result is "not leading".
+     message's own content: its content result is "not leading". A
+     malformed header token is reported, rejected, and names no `mid`, so
+     a body marker can still be the original and verify.
+   - A malformed body token cannot be placed, like an
+     [earlier-format marker](#earlier-marker-format).
    - Every other body marker is a quoted copy from earlier in the
      conversation.
 7. Check coverage: does the walk outside the original container produce any
@@ -525,13 +535,16 @@ target, image source, link title or image description changes it.
    content outside the original container: any part that is not marked
    `Content-Disposition: attachment` and is not inside such a part, for
    example a second HTML part, an inline image, an inline forwarded message,
-   or a plain-text alternative. The one exception is a `text/plain` part
-   whose text, read as one text item under step 2 of
-   [Canonical string](#canonical-string), equals the original container's
-   text items, in order, read as one text item. Link targets and attribute
-   text are not compared, and a part whose text cannot be decoded counts.
-   An attachment is a file of its own: the marker does not cover it, and it
-   does not change the verdict.
+   or a `text/plain` part outside the HTML body's alternative. The one
+   exception is the plain-text alternative to the HTML body: a `text/plain`
+   part that is a direct child of a `multipart/alternative` part holding the
+   HTML body, directly or inside another part (Outlook puts the HTML in a
+   `multipart/related`). Mail clients show the HTML, and Exchange adds a
+   generated plain-text alternative to most mail, so a plain-text
+   alternative to the HTML body is not checked: it may say something else
+   (see [Transport limits](#transport-limits)). An attachment is a file of
+   its own: the marker does not cover it, and it does not change the
+   verdict.
 8. Place each violation inside or outside the original container.
 
 A signature vouches for the text of one container, not for the message
@@ -540,9 +553,9 @@ Verdicts:
 
 | Verdict | Meaning |
 | --- | --- |
-| `verified` | The original marker is valid, its digest matches, its container holds only allowlisted markup, and outside it the message holds nothing but empty scaffolding (`html`, `head`, `body`, an allowed `meta`, an empty `title`) and the hidden block. In an email, no other part a reader may see differs (step 7). The words and links are the signed ones; the digest does not cover whitespace, presentation, or how much text a link spans (see [Transport limits](#transport-limits)). |
+| `verified` | The original marker is valid, its digest matches, its container holds only allowlisted markup, and outside it the message holds nothing but empty scaffolding (`html`, `head`, `body`, an allowed `meta`, an empty `title`) and the hidden block. In an email, no other part a reader may see is present (step 7); a plain-text alternative to the HTML body is not checked. The words and links are the signed ones; the digest does not cover whitespace, presentation, or how much text a link spans (see [Transport limits](#transport-limits)). |
 | `verified_with_unmarked_content` | The signed text is intact, but styling or markup in or around it, which could change how it is shown, is not vouched for, nor is the rest of the message. The original marker is valid and its digest matches, but its container holds a violation of the markup allowlist (styling, a class, a comment, an element outside the list), or the message has content outside its container (text, links, images or any other element, or another part of an email), or violations outside it (a quoted conversation, a head style sheet, a conditional comment, content added around a copied fragment). None of that may be attributed to the marker. A verified PDF always reads this way (see [Verifying a file](#verifying-a-file)). |
-| `ai_marked_unverified` | The message carries its own marker but it does not verify: unsigned, bad or unknown signature, rejected token, content changed after signing (for example, a draft a person edited before sending), or missing or non-leading content. Also returned for any `X-AI-Generated` header, whatever its value, and for an earlier-format marker anywhere in the message, a quoted trail included (see below). A reply that merely quotes an earlier-format message therefore reads `ai_marked_unverified`; a caller checking mail it did not label itself must not read this verdict as "this message was labelled". |
+| `ai_marked_unverified` | The message carries its own marker but it does not verify: unsigned, bad or unknown signature, rejected token, content changed after signing (for example, a draft a person edited before sending), or missing or non-leading content, a leading hidden block whose container was removed included. Also returned, when no marker of the message's own verifies, for any `X-AI-Generated` header, whatever its value, and for an earlier-format marker or a malformed body token anywhere in the message, a quoted trail included (see below): neither can be placed. A reply that merely quotes an earlier-format message therefore reads `ai_marked_unverified`; a caller checking mail it did not label itself must not read this verdict as "this message was labelled". Beside an original that verifies, such a marker is content outside its container, and the verdict is `verified_with_unmarked_content`; a malformed header token is listed as rejected and leaves the verdict as it is. |
 | `quoted_only` | Every marker is a quoted copy; the message quotes a marked message but was not itself marked. |
 | `no_marker` | No marker found. |
 | `unparseable` | The HTML body exceeds a cap in [Parsing](#parsing) or the parser failed on it. Nothing in it is verified. |
@@ -561,7 +574,10 @@ Messages sent before this specification carry a hidden block whose
 `data-ai-disclosure` attribute holds a JSON object (`ai_generated`, `system`,
 `on_behalf_of`, `spec: "EU-AI-Act-Article-50"`) rather than a token. Such a
 marker is unsigned and has no content container, so it can be detected but
-neither verified nor placed as original or quoted. Wherever it appears, the
+neither verified nor placed as original or quoted. When the message's own
+marker verifies, an earlier-format marker elsewhere, a quoted one included,
+is content outside the original container, and the verdict is
+`verified_with_unmarked_content`. Otherwise, wherever it appears, the
 verdict is `ai_marked_unverified`.
 
 ## Files
@@ -706,12 +722,12 @@ mismatch.
   as its target, at the point where the link starts, not as the text it
   spans: an anchor can be stretched over neighbouring visible text, or
   shrunk, without changing the digest.
-- A mail system may add a plain-text alternative written from the HTML. If
-  it writes link targets, list markers or other text of its own into it,
-  that part differs from the signed text, and the message reads
-  `verified_with_unmarked_content` (step 7 of
-  [Verifying a message](#verifying-a-message)). Whether Exchange adds such a
-  part, and how it writes it, has not been confirmed on a received sample.
+- A plain-text alternative to the HTML body is not checked (step 7 of
+  [Verifying a message](#verifying-a-message)). Mail clients show the HTML,
+  and Exchange adds a plain-text alternative written from the HTML to most
+  mail. That part can say something else: a reader whose client shows
+  plain text, or a program that reads it, sees words the marker does not
+  vouch for, and the verdict can still be `verified`.
 - Exchange and Outlook may rewrite a message's HTML in transit or on reply.
   A reply composed by Exchange (`createReply`) carries the quoted
   conversation in Outlook's own markup, outside the signed container;
@@ -822,7 +838,9 @@ this order:
 5. Anything else is a message.
 
 A fragment whose first line looks like a header field (`Note: …`) is read
-as a message, and the markers in it are not found. An Office file whose XML,
-or a message whose MIME parts, nest too deeply for the parsers is reported
-as unreadable (exit status 2), as an HTML body over the caps in
-[Parsing](#parsing) is `unparseable`; neither reads as `no_marker`.
+as a message, and the markers in it are not found. A message whose MIME
+parts nest too deeply for the parser is reported as unreadable (exit status
+2), as an HTML body over the caps in [Parsing](#parsing) is `unparseable`.
+An Office file whose routing XML nests too deeply to serialise keeps its
+marker, with its content not found (exit status 3). None of these reads as
+`no_marker`.
