@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 from email.message import EmailMessage
 from pathlib import Path
@@ -23,7 +24,8 @@ def eml(tmp_path: Path, vectors: dict[str, Any]) -> Path:
     message["Subject"] = "Payment"
     message["X-AI-Generated"] = "true"
     message["X-Complexio-AI-Disclosure"] = token
-    message.set_content("Plain text part.")
+    # A plain-text alternative with the signed words, as mail clients add one.
+    message.set_content(re.sub(r"<[^>]+>", " ", body))
     message.add_alternative(body, subtype="html")
     path = tmp_path / "message.eml"
     path.write_bytes(bytes(message))
@@ -155,6 +157,17 @@ def test_message_without_a_signed_marker_needs_no_key_set(
     path.write_text("<p>Hello</p>", encoding="utf-8")
 
     assert cli.main([str(path)]) == cli.EXIT_NO_MARKER
+
+
+def test_a_differing_plain_text_part_reads_as_unmarked_content(
+    eml: Path, jwks_file: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    eml.write_bytes(eml.read_bytes().replace(b"Friday", b"Monday", 1))
+
+    status = cli.main([str(eml), "--jwks", str(jwks_file)])
+
+    assert status == cli.EXIT_VERIFIED_WITH_UNMARKED_CONTENT
+    assert "Content outside the marker: yes" in capsys.readouterr().out
 
 
 def test_missing_file_is_an_error(tmp_path: Path) -> None:

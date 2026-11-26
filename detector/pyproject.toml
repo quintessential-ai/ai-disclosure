@@ -8,11 +8,14 @@ version = "0.1.0"
 description = "Verify the AI-disclosure marker in an email: detect, check the signature, read the verdict."
 readme = "README.md"
 license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
     "cryptography>=43",
     "defusedxml>=0.7.1",
-    "html5lib>=1.1",
+    # The parser subclasses html5lib internals, so a new release is taken on
+    # purpose.
+    "html5lib>=1.1,<1.2",
 ]
 
 [project.scripts]
@@ -23,6 +26,11 @@ dev = ["pytest>=8"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ai_disclosure_verify"]
+
+[tool.hatch.build.targets.sdist]
+# The tests read the vectors from the repository root, so they run from a
+# checkout, not from the sdist.
+include = ["src/ai_disclosure_verify", "README.md", "LICENSE"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
