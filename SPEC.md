@@ -554,6 +554,10 @@ prove nothing.
 Recompressing or reordering the package keeps the digest; changing any
 part's content (text, numbers, styles, images) breaks it.
 
+The reference checker refuses, before reading any part, a package of more
+than 10,000 parts or 512 MiB uncompressed, or with a part neither stored nor
+deflated (the only methods OPC allows).
+
 ### `pdf-revision/1`
 
 The marker is written as an incremental update, after the file as generated.

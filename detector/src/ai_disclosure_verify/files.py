@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import hashlib
 import io
-import lzma
 import re
 import zipfile
 import zlib
@@ -36,6 +35,13 @@ _NS_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
 _NS_CUSTOM = "http://schemas.openxmlformats.org/officeDocument/2006/custom-properties"
 _NS_CT = "http://schemas.openxmlformats.org/package/2006/content-types"
 _REL_CUSTOM = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/custom-properties"
+# Caps on an Office package, checked on the sizes it declares before any part
+# is read. Normal Office files stay far below both.
+MAX_PACKAGE_PARTS = 10_000
+MAX_PACKAGE_BYTES = 512 * 1024 * 1024
+# OPC packages use only these; zipfile does not bound every other method's output.
+_PACKAGE_COMPRESSION = frozenset({zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED})
+_READ_CHUNK = 64 * 1024
 _EOF = b"%%EOF"
 _TOKEN = rb"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*"
 _PDF_TOKEN = re.compile(
@@ -54,32 +60,56 @@ def is_pdf(data: bytes) -> bool:
     return data.startswith(b"%PDF-")
 
 
-def _package_parts(zf: zipfile.ZipFile) -> dict[str, bytes]:
-    names = [info.filename for info in zf.infolist() if not info.is_dir()]
-    if len(names) != len(set(names)):
+def _package_infos(zf: zipfile.ZipFile) -> dict[str, zipfile.ZipInfo]:
+    """The package's parts by name, refused on what they declare before any is read."""
+    infos = [info for info in zf.infolist() if not info.is_dir()]
+    by_name = {info.filename: info for info in infos}
+    if len(by_name) != len(infos):
         msg = "duplicate Office package part"
         raise ValueError(msg)
+    if len(infos) > MAX_PACKAGE_PARTS:
+        msg = f"Office package has more than {MAX_PACKAGE_PARTS} parts"
+        raise ValueError(msg)
+    if sum(info.file_size for info in infos) > MAX_PACKAGE_BYTES:
+        msg = f"Office package is over {MAX_PACKAGE_BYTES} bytes uncompressed"
+        raise ValueError(msg)
+    for info in infos:
+        if info.compress_type not in _PACKAGE_COMPRESSION:
+            msg = (
+                f"cannot read Office package parts: {info.filename} "
+                f"uses compression method {info.compress_type}"
+            )
+            raise ValueError(msg)
+        if info.flag_bits & 0x1:
+            msg = f"cannot read Office package parts: {info.filename} is encrypted"
+            raise ValueError(msg)
+    return by_name
+
+
+def _read_part(zf: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes:
+    # A sized read inflates at most that much per step and stops at the
+    # declared size; an unsized one inflates the whole stream first.
+    chunks: list[bytes] = []
     try:
-        return {name: zf.read(name) for name in names}
-    except (
-        RuntimeError,
-        NotImplementedError,
-        OSError,
-        EOFError,
-        zlib.error,
-        lzma.LZMAError,
-    ) as exc:
+        with zf.open(info) as part:
+            while chunk := part.read(_READ_CHUNK):
+                chunks.append(chunk)
+    except (RuntimeError, NotImplementedError, OSError, EOFError, zlib.error) as exc:
         msg = f"cannot read Office package parts: {exc}"
         raise ValueError(msg) from exc
+    return b"".join(chunks)
 
 
-def _custom_properties_part(parts: dict[str, bytes]) -> str:
-    if _ROOT_RELS not in parts:
+def _package_parts(zf: zipfile.ZipFile) -> dict[str, bytes]:
+    return {name: _read_part(zf, info) for name, info in _package_infos(zf).items()}
+
+
+def _custom_properties_part(rels: bytes | None) -> str:
+    if rels is None:
         return _CUSTOM_PART
-    rels = fromstring(parts[_ROOT_RELS])
     custom = [
         rel
-        for rel in rels.iterfind(f"{{{_NS_REL}}}Relationship")
+        for rel in fromstring(rels).iterfind(f"{{{_NS_REL}}}Relationship")
         if rel.get("Type") == _REL_CUSTOM
     ]
     if not custom:
@@ -114,10 +144,12 @@ def ooxml_digest(data: bytes) -> str:
     removing the custom-properties relationship and its content-type override.
     Each sorted part contributes ``<name>\\n<base64url SHA-256>\\n``.
     Duplicate parts, unsafe XML and ambiguous metadata relationships are rejected.
+    So is a package over ``MAX_PACKAGE_PARTS`` parts or ``MAX_PACKAGE_BYTES``
+    uncompressed, or with a part neither stored nor deflated.
     """
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         parts = _package_parts(zf)
-    custom = _custom_properties_part(parts)
+    custom = _custom_properties_part(parts.get(_ROOT_RELS))
     if (
         custom in parts
         and fromstring(parts[custom]).tag != f"{{{_NS_CUSTOM}}}Properties"
@@ -155,13 +187,17 @@ def pdf_digest(revision: bytes) -> str:
 
 
 def ooxml_token(data: bytes) -> str | None:
-    """The token in the package's ``AIDisclosure`` custom property, if any."""
+    """The token in the package's ``AIDisclosure`` custom property, if any.
+
+    Reads only the package relationships and the custom-properties part.
+    """
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
-        parts = _package_parts(zf)
-    part = _custom_properties_part(parts)
-    if part not in parts:
-        return None
-    props = fromstring(parts[part])
+        infos = _package_infos(zf)
+        rels = _read_part(zf, infos[_ROOT_RELS]) if _ROOT_RELS in infos else None
+        part = _custom_properties_part(rels)
+        if part not in infos:
+            return None
+        props = fromstring(_read_part(zf, infos[part]))
     if props.tag != f"{{{_NS_CUSTOM}}}Properties":
         msg = "custom-properties part is not metadata"
         raise ValueError(msg)
