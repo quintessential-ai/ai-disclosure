@@ -7,9 +7,10 @@ import json
 import tracemalloc
 import zipfile
 from pathlib import Path
+from typing import Any
 
 import pytest
-from helpers import GOLDEN_KID, golden_jwks, golden_public_key
+from helpers import GOLDEN_KID, golden_jwks, golden_public_key, signed_vector_body
 
 from ai_disclosure_verify import ContentCheck, Verdict, cli, files
 from ai_disclosure_verify.detect import MessageDecodeError, detect_file
@@ -212,3 +213,18 @@ def test_the_token_lookup_reads_only_the_relationships_and_custom_part(
 
     assert files.ooxml_token(docx) is not None
     assert read == ["_rels/.rels", "docProps/custom.xml"]
+
+
+def test_a_byte_order_mark_before_html_does_not_hide_the_marker(
+    vectors: dict[str, Any], tmp_path: Path, jwks_file: Path
+) -> None:
+    body, _ = signed_vector_body(vectors["signed_as_written"][0])
+    plain = body.encode("utf-8")
+
+    with_bom = detect_file(b"\xef\xbb\xbf" + plain, KEYS)
+
+    assert with_bom.verdict is not Verdict.NONE
+    assert with_bom.to_dict() == detect_file(plain, KEYS).to_dict()
+    assert _cli(tmp_path, "body.html", b"\xef\xbb\xbf" + plain, jwks_file) == _cli(
+        tmp_path, "plain.html", plain, jwks_file
+    )

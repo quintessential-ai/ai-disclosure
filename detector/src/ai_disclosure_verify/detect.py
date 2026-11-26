@@ -449,9 +449,10 @@ def detect_file(
             lambda: pdf_digest(found[1] if found else b""),
         )
         return replace(report, unmarked_content=found is not None)
-    head = data.lstrip()[:1]
+    # An editor may put a UTF-8 byte-order mark before the markup.
+    head = data.removeprefix(b"\xef\xbb\xbf").lstrip()[:1]
     if head == b"<":
-        return detect_html(data.decode("utf-8", errors="replace"), keys)
+        return detect_html(data.decode("utf-8-sig", errors="replace"), keys)
     return detect_message(data, keys)
 
 
