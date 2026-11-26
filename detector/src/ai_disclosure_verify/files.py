@@ -16,11 +16,15 @@ import re
 import zipfile
 import zlib
 from posixpath import normpath
+from typing import TYPE_CHECKING
 from xml.etree import ElementTree
 
 from defusedxml.ElementTree import fromstring
 
 from ai_disclosure_verify.jws import b64url_encode
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 OOXML_CANONICALISATION = "ooxml-parts/1"
 PDF_CANONICALISATION = "pdf-revision/1"
@@ -36,9 +40,13 @@ _NS_CUSTOM = "http://schemas.openxmlformats.org/officeDocument/2006/custom-prope
 _NS_CT = "http://schemas.openxmlformats.org/package/2006/content-types"
 _REL_CUSTOM = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/custom-properties"
 # Caps on an Office package, checked on the sizes it declares before any part
-# is read. Normal Office files stay far below both.
+# is read. Normal Office files stay far below both. Parts are hashed as they
+# are inflated, so the size cap bounds the time a digest takes, not memory.
 MAX_PACKAGE_PARTS = 10_000
 MAX_PACKAGE_BYTES = 512 * 1024 * 1024
+# The routing and custom-properties parts are parsed whole. Routing for
+# 10,000 parts takes about 2 MB.
+MAX_XML_PART_BYTES = 4 * 1024 * 1024
 # OPC packages use only these; zipfile does not bound every other method's output.
 _PACKAGE_COMPRESSION = frozenset({zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED})
 _READ_CHUNK = 64 * 1024
@@ -88,22 +96,34 @@ def _package_infos(zf: zipfile.ZipFile) -> dict[str, zipfile.ZipInfo]:
     return by_name
 
 
-def _read_part(zf: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes:
+def _read_chunks(zf: zipfile.ZipFile, info: zipfile.ZipInfo) -> Iterator[bytes]:
     # A sized read inflates at most that much per step and stops at the
     # declared size; an unsized one inflates the whole stream first.
-    chunks: list[bytes] = []
     try:
         with zf.open(info) as part:
             while chunk := part.read(_READ_CHUNK):
-                chunks.append(chunk)
+                yield chunk
     except (RuntimeError, NotImplementedError, OSError, EOFError, zlib.error) as exc:
         msg = f"cannot read Office package parts: {exc}"
         raise ValueError(msg) from exc
-    return b"".join(chunks)
 
 
-def _package_parts(zf: zipfile.ZipFile) -> dict[str, bytes]:
-    return {name: _read_part(zf, info) for name, info in _package_infos(zf).items()}
+def _read_part(zf: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes:
+    """A routing or metadata part, whole; refused over ``MAX_XML_PART_BYTES``."""
+    if info.file_size > MAX_XML_PART_BYTES:
+        msg = (
+            f"Office routing or metadata part {info.filename} is over "
+            f"{MAX_XML_PART_BYTES} bytes"
+        )
+        raise ValueError(msg)
+    return b"".join(_read_chunks(zf, info))
+
+
+def _part_sha256(zf: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes:
+    digest = hashlib.sha256()
+    for chunk in _read_chunks(zf, info):
+        digest.update(chunk)
+    return digest.digest()
 
 
 def _custom_properties_part(rels: bytes | None) -> str:
@@ -131,10 +151,14 @@ def _normalized_routing(data: bytes, tag: str, attribute: str, value: str) -> by
     for child in list(root):
         if child.tag == tag and child.get(attribute) == value:
             root.remove(child)
+    try:
+        written = ElementTree.tostring(root, encoding="unicode")
+    except RecursionError as exc:
+        # The serialiser recurses once per level of nesting.
+        msg = "Office routing XML is nested too deeply"
+        raise ValueError(msg) from exc
     return ElementTree.canonicalize(
-        ElementTree.tostring(root, encoding="unicode"),
-        strip_text=True,
-        rewrite_prefixes=True,
+        written, strip_text=True, rewrite_prefixes=True
     ).encode("utf-8")
 
 
@@ -147,30 +171,42 @@ def ooxml_digest(data: bytes) -> str:
     Each sorted part contributes ``<name>\\n<base64url SHA-256>\\n``.
     Duplicate parts, unsafe XML and ambiguous metadata relationships are rejected.
     So is a package over ``MAX_PACKAGE_PARTS`` entries (directories included)
-    or ``MAX_PACKAGE_BYTES`` uncompressed, or with a part neither stored nor
-    deflated.
+    or ``MAX_PACKAGE_BYTES`` uncompressed, with a part neither stored nor
+    deflated, or with a routing or custom-properties part over
+    ``MAX_XML_PART_BYTES``. Other parts are hashed as they are inflated.
     """
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
-        parts = _package_parts(zf)
-    custom = _custom_properties_part(parts.get(_ROOT_RELS))
-    if (
-        custom in parts
-        and fromstring(parts[custom]).tag != f"{{{_NS_CUSTOM}}}Properties"
-    ):
-        msg = "custom-properties part is not metadata"
-        raise ValueError(msg)
-    parts.pop(custom, None)
-    if _ROOT_RELS in parts:
-        parts[_ROOT_RELS] = _normalized_routing(
-            parts[_ROOT_RELS], f"{{{_NS_REL}}}Relationship", "Type", _REL_CUSTOM
-        )
-    if _CONTENT_TYPES in parts:
-        parts[_CONTENT_TYPES] = _normalized_routing(
-            parts[_CONTENT_TYPES], f"{{{_NS_CT}}}Override", "PartName", f"/{custom}"
-        )
+        infos = _package_infos(zf)
+        rels = _read_part(zf, infos[_ROOT_RELS]) if _ROOT_RELS in infos else None
+        custom = _custom_properties_part(rels)
+        if (
+            custom in infos
+            and fromstring(_read_part(zf, infos[custom])).tag
+            != f"{{{_NS_CUSTOM}}}Properties"
+        ):
+            msg = "custom-properties part is not metadata"
+            raise ValueError(msg)
+        hashes: dict[str, bytes] = {}
+        for name, info in infos.items():
+            if name == custom:
+                continue
+            if name == _ROOT_RELS and rels is not None:
+                routing = _normalized_routing(
+                    rels, f"{{{_NS_REL}}}Relationship", "Type", _REL_CUSTOM
+                )
+            elif name == _CONTENT_TYPES:
+                routing = _normalized_routing(
+                    _read_part(zf, info),
+                    f"{{{_NS_CT}}}Override",
+                    "PartName",
+                    f"/{custom}",
+                )
+            else:
+                hashes[name] = _part_sha256(zf, info)
+                continue
+            hashes[name] = hashlib.sha256(routing).digest()
     listing = "".join(
-        f"{name}\n{b64url_encode(hashlib.sha256(parts[name]).digest())}\n"
-        for name in sorted(parts)
+        f"{name}\n{b64url_encode(hashes[name])}\n" for name in sorted(hashes)
     )
     return b64url_encode(hashlib.sha256(listing.encode("utf-8")).digest())
 

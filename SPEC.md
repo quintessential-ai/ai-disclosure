@@ -560,7 +560,10 @@ prove nothing.
 1. Before reading any part, reject a package with a part that is encrypted or
    neither stored nor deflated, the only methods OPC allows. The reference
    issuer and checker also reject a package with more than 10,000 entries
-   (directories included) or more than 512 MiB of declared uncompressed size.
+   (directories included) or more than 512 MiB of declared uncompressed size,
+   and a `_rels/.rels`, `[Content_Types].xml` or custom-properties part
+   declaring more than 4 MiB; only those three are read whole, every other
+   part is hashed as it is read.
    Reject duplicate part names, XML entity declarations, and ambiguous or
    external custom-properties relationships. Select the custom-properties part
    from the package relationship, defaulting to `docProps/custom.xml` when no
