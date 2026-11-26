@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -91,3 +91,23 @@ def signed_vector_body(
         'aria-hidden="true"></div>'
     )
     return vector["expected"]["content_html"] + marker, token
+
+
+class FakeResponse:
+    """What ``keys.urlopen`` returns: a body, served from ``url``."""
+
+    def __init__(self, body: bytes, url: str) -> None:
+        self.body = body
+        self.url = url
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def geturl(self) -> str:
+        return self.url
+
+    def read(self, limit: int) -> bytes:
+        return self.body[:limit]

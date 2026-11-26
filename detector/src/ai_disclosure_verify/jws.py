@@ -28,6 +28,11 @@ if TYPE_CHECKING:
 ALG_EDDSA = "EdDSA"
 ALG_NONE = "none"
 
+# The protected header members this profile uses. Any other member, ``b64``
+# and ``crit`` included, makes the token invalid: a member a verifier ignores
+# may be one another verifier acts on.
+HEADER_MEMBERS = frozenset({"alg", "typ", "kid"})
+
 _B64URL_ALPHABET = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 )
@@ -67,14 +72,48 @@ def b64url_encode(data: bytes) -> str:
 
 
 def b64url_decode(text: str) -> bytes:
-    """Decode unpadded base64url; raises ``ValueError`` on bad input."""
+    """Decode unpadded base64url; raises ``ValueError`` on bad input.
+
+    Only the canonical encoding is accepted: the unused bits of the last
+    character must be zero, so each byte string has one spelling.
+    """
     if any(c not in _B64URL_ALPHABET for c in text):
         msg = "not base64url"
         raise ValueError(msg)
     try:
-        return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+        data = base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
     except binascii.Error as exc:
         raise ValueError(str(exc)) from exc
+    if b64url_encode(data) != text:
+        msg = "non-zero trailing bits"
+        raise ValueError(msg)
+    return data
+
+
+def parse_json(data: str | bytes) -> Any:
+    """Parse JSON text, refusing what RFC 8259 leaves to the parser.
+
+    Bytes must be UTF-8. Duplicate member names, ``NaN``, ``Infinity`` and a
+    byte-order mark are refused, as is an integer too long for Python to
+    convert. Raises ``ValueError``.
+    """
+    text = data.decode("utf-8") if isinstance(data, bytes) else data
+    return json.loads(
+        text, object_pairs_hook=_unique_members, parse_constant=_refuse_constant
+    )
+
+
+def _unique_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    members = dict(pairs)
+    if len(members) != len(pairs):
+        msg = "duplicate member name"
+        raise ValueError(msg)
+    return members
+
+
+def _refuse_constant(name: str) -> Any:
+    msg = f"{name} is not JSON"
+    raise ValueError(msg)
 
 
 def _compact_json(value: Mapping[str, Any]) -> bytes:
@@ -90,10 +129,10 @@ def decode_compact(token: str) -> DecodedToken:
         msg = "a compact JWS has exactly three dot-separated parts"
         raise MalformedTokenError(msg)
     try:
-        header = json.loads(b64url_decode(parts[0]))
-        payload = json.loads(b64url_decode(parts[1]))
+        header = parse_json(b64url_decode(parts[0]))
+        payload = parse_json(b64url_decode(parts[1]))
         signature = b64url_decode(parts[2])
-    except (ValueError, UnicodeDecodeError, RecursionError) as exc:
+    except (ValueError, RecursionError) as exc:
         raise MalformedTokenError(str(exc)) from exc
     if not isinstance(header, dict) or not isinstance(payload, dict):
         msg = "JWS header and payload must be JSON objects"
@@ -112,12 +151,16 @@ def check_signature(
     """Check ``token`` against ``keys`` (kid to public key).
 
     ``keys=None`` means the caller has no key set, so a signed token is
-    reported ``NOT_CHECKED`` rather than valid. A ``crit`` header or an
-    algorithm other than ``EdDSA``/``none`` is ``INVALID``: this profile
-    understands no extensions.
+    reported ``NOT_CHECKED`` rather than valid. A header member other than
+    ``HEADER_MEMBERS`` (``crit`` and ``b64`` among them), a ``kid`` that is
+    not a string, or an algorithm other than ``EdDSA``/``none`` is
+    ``INVALID``: this profile understands no extensions.
     """
     alg = token.header.get("alg")
-    if "crit" in token.header:
+    if not HEADER_MEMBERS.issuperset(token.header):
+        return SignatureStatus.INVALID
+    kid = token.header.get("kid", "")
+    if not isinstance(kid, str):
         return SignatureStatus.INVALID
     if alg == ALG_NONE:
         if token.signature:
@@ -127,7 +170,7 @@ def check_signature(
         return SignatureStatus.INVALID
     if keys is None:
         return SignatureStatus.NOT_CHECKED
-    key = keys.get(str(token.header.get("kid", "")))
+    key = keys.get(kid)
     if key is None:
         return SignatureStatus.UNKNOWN_KEY
     try:
@@ -144,34 +187,56 @@ def jwk_thumbprint(key: Ed25519PublicKey) -> str:
 
 
 def keys_from_jwks(jwks: object) -> dict[str, Ed25519PublicKey]:
-    """Read the Ed25519 keys of a JWKS document, keyed by ``kid``.
+    """Read the Ed25519 verification keys of a JWKS document, keyed by ``kid``.
 
-    Entries of other key types are skipped, so a shared JWKS can carry them.
-    An Ed25519 entry without a ``kid`` takes its RFC 7638 thumbprint.
+    As RFC 7517 section 5 asks, an entry this profile cannot use is skipped
+    rather than failing the set: another key type or curve, a ``use`` other
+    than ``sig``, an ``alg`` other than ``EdDSA``, ``key_ops`` without
+    ``verify``, a ``kid`` that is not a string, or no canonical 32-byte
+    ``x``. An Ed25519 entry without a ``kid`` takes its RFC 7638 thumbprint.
+    The ``kid`` is a name: it is not compared with the thumbprint. A ``kid``
+    that two usable entries share names no key, since either could be meant.
 
     Raises:
-        JwksError: The document is not a JWKS object, or an Ed25519 entry has
-            no valid 32-byte ``x``.
+        JwksError: The document is not a JSON object with a ``keys`` array.
 
     """
     if not isinstance(jwks, dict) or not isinstance(jwks.get("keys"), list):
         msg = 'JWKS must be a JSON object with a "keys" array'
         raise JwksError(msg)
     keys: dict[str, Ed25519PublicKey] = {}
-    for index, entry in enumerate(jwks["keys"]):
-        if not isinstance(entry, dict):
-            msg = f"JWKS key {index} is not an object"
-            raise JwksError(msg)
-        if entry.get("kty") != "OKP" or entry.get("crv") != "Ed25519":
+    shared: set[str] = set()
+    for entry in jwks["keys"]:
+        key = _verification_key(entry)
+        if key is None:
             continue
-        try:
-            raw = b64url_decode(entry["x"])
-            key = Ed25519PublicKey.from_public_bytes(raw)
-        except (KeyError, TypeError, ValueError) as exc:
-            msg = f"JWKS key {index} has no valid Ed25519 'x'"
-            raise JwksError(msg) from exc
-        keys[str(entry.get("kid") or jwk_thumbprint(key))] = key
-    return keys
+        kid = entry.get("kid") or jwk_thumbprint(key)
+        if kid in keys:
+            shared.add(kid)
+        keys[kid] = key
+    return {kid: key for kid, key in keys.items() if kid not in shared}
+
+
+def _verification_key(entry: object) -> Ed25519PublicKey | None:
+    """The Ed25519 key of one JWKS entry, or None when it is not usable here."""
+    if not isinstance(entry, dict):
+        return None
+    if entry.get("kty") != "OKP" or entry.get("crv") != "Ed25519":
+        return None
+    if entry.get("use", "sig") != "sig" or entry.get("alg", ALG_EDDSA) != ALG_EDDSA:
+        return None
+    key_ops = entry.get("key_ops", ["verify"])
+    if not isinstance(key_ops, list) or "verify" not in key_ops:
+        return None
+    if not isinstance(entry.get("kid", ""), str):
+        return None
+    x = entry.get("x")
+    if not isinstance(x, str):
+        return None
+    try:
+        return Ed25519PublicKey.from_public_bytes(b64url_decode(x))
+    except ValueError:
+        return None
 
 
 def _raw_public(key: Ed25519PublicKey) -> bytes:

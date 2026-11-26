@@ -6,9 +6,21 @@ import json
 from typing import Any
 
 import pytest
-from helpers import GOLDEN_KID, VECTORS, golden_public_key, signed_vector_body
+from helpers import (
+    GOLDEN_KID,
+    VECTORS,
+    golden_jwks,
+    golden_public_key,
+    signed_vector_body,
+)
 
-from ai_disclosure_verify import ContentCheck, SignatureStatus, Verdict, detect_html
+from ai_disclosure_verify import (
+    ContentCheck,
+    SignatureStatus,
+    Verdict,
+    detect_html,
+    keys_from_jwks,
+)
 from ai_disclosure_verify.canonical import (
     CANONICALISATION,
     CANONICALISATION_V1,
@@ -23,7 +35,7 @@ MID = "0" * 32
 
 def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
     data = json.loads(VECTORS.read_text(encoding="utf-8"))
-    for section in ("canonical", "label", "signed_as_written"):
+    for section in ("canonical", "label", "signed_as_written", "detection"):
         if section in metafunc.fixturenames:
             metafunc.parametrize(
                 section, [pytest.param(v, id=v["name"]) for v in data[section]]
@@ -83,7 +95,8 @@ def test_signed_vector_verifies_to_the_expected_verdict(
     region = scan_html(body).regions[signed_as_written["input"]["mid"]]
     canonical = canonical_as(region.canonical, CANONICALISATION)
     assert canonical == expected["canonical"]
-    assert token.count(".") == 2
+    # The test key and fixed claims reproduce the issuer's token byte for byte.
+    assert token == expected["token"]
 
 
 def test_signed_vector_without_the_key_is_unverified(
@@ -125,3 +138,47 @@ def test_an_unknown_canonicalisation_is_unsupported(vectors: dict[str, Any]) -> 
     (finding,) = detect_html(body, {GOLDEN_KID: golden_public_key()}).findings
 
     assert finding.content is ContentCheck.UNSUPPORTED
+
+
+def test_the_vectors_publish_the_test_key(vectors: dict[str, Any]) -> None:
+    assert vectors["jwks"] == golden_jwks()
+
+
+def test_detection_vector(vectors: dict[str, Any], detection: dict[str, Any]) -> None:
+    """Every marker the reference found, and what checking it showed."""
+    given, expected = detection["input"], detection["expected"]
+    keys = keys_from_jwks(vectors["jwks"]) if given["jwks"] else None
+
+    report = detect_html(
+        given["html_body"],
+        keys,
+        header_token=given["header_token"],
+        ai_generated_header=given["x_ai_generated"],
+    )
+
+    markup = report.disallowed_markup
+    assert report.verdict.value == expected["verdict"]
+    assert report.unmarked_content is expected["unmarked_content"]
+    assert (markup.first if markup else None) == expected["first_violation"]
+    assert [
+        {
+            "carrier": finding.carrier.value,
+            "placement": finding.placement.value,
+            "signature": finding.signature.value,
+            "content": finding.content.value,
+            "rejected": finding.error is not None,
+            "legacy": finding.legacy,
+        }
+        for finding in report.findings
+    ] == expected["findings"]
+
+
+def test_detection_vectors_reach_every_outcome(vectors: dict[str, Any]) -> None:
+    detections = vectors["detection"]
+    findings = [f for v in detections for f in v["expected"]["findings"]]
+
+    assert {v["expected"]["verdict"] for v in detections} == {v.value for v in Verdict}
+    assert {f["signature"] for f in findings} == {s.value for s in SignatureStatus}
+    assert {f["content"] for f in findings} == {c.value for c in ContentCheck}
+    assert any(f["rejected"] and f["signature"] == "valid" for f in findings)
+    assert any(f["legacy"] for f in findings)
