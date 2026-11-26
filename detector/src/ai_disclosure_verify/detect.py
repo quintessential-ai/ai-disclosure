@@ -710,7 +710,8 @@ def _legacy_finding(value: str, carrier: Carrier, placement: Placement) -> Findi
     """The pre-signing JSON marker: still a disclosure, never verifiable."""
     try:
         claims = json.loads(value)
-    except (json.JSONDecodeError, RecursionError) as exc:
+    # ValueError also covers an integer over Python's digit limit.
+    except (ValueError, RecursionError) as exc:
         claims, error = {}, f"malformed legacy marker: {exc}"
     else:
         error = None if isinstance(claims, dict) else "malformed legacy marker"

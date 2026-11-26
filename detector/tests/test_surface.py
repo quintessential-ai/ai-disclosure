@@ -447,3 +447,19 @@ def test_the_package_ships_the_repository_licence() -> None:
     assert (ROOT / "detector" / "LICENSE").read_bytes() == (
         ROOT / "LICENSE"
     ).read_bytes()
+
+
+def test_a_legacy_marker_with_a_huge_number_reads_as_malformed() -> None:
+    value = '{"ai_generated": true, "n": ' + "1" * 5000 + "}"
+    body = (
+        f"<div data-ai-disclosure='{value}' "
+        'style="display:none" aria-hidden="true"></div>'
+    )
+
+    report = detect_html(body)
+
+    (finding,) = report.findings
+    assert finding.legacy
+    assert finding.error is not None
+    assert finding.error.startswith("malformed legacy marker")
+    assert report.verdict is Verdict.UNVERIFIED
