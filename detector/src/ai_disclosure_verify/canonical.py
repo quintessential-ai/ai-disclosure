@@ -29,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import re
 import unicodedata
+from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import parse_qsl
@@ -36,8 +37,9 @@ from xml.etree import ElementTree
 
 import html5lib
 from html5lib._tokenizer import HTMLTokenizer
+from html5lib.constants import tableInsertModeElements, tokenTypes
 
-from ai_disclosure_verify.jws import b64url_encode
+from ai_disclosure_verify.jws import MalformedTokenError, b64url_encode, decode_compact
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -66,10 +68,25 @@ ITEM_CLOSE = "\x1f"
 MAX_DOCUMENT_BYTES = 5 * 1024 * 1024
 MAX_DEPTH = 256
 MAX_ATTRIBUTES = 64
-# Bounds html5lib's parse time: each element costs up to a scan of the open
-# elements, so a document of nothing but tags runs to tens of seconds at the
-# byte cap. Mail with a large table stays well under it.
+# Each element costs html5lib up to a scan of the open elements, so a
+# document of nothing but tags runs to tens of seconds at the byte cap. Mail
+# with a large table stays well under it.
 MAX_ELEMENTS = 200_000
+# html5lib builds each text node, attribute value, comment and name by
+# appending to a string, and places each piece of foster-parented content by
+# scanning the foster parent's children, so many short pieces cost the
+# square of their count (an attribute of a few MB of bare "&" ran to
+# minutes). The parse stops once the characters it copies, or the children
+# it scans, pass these; either takes well under a second to reach.
+MAX_COPIED_CHARACTERS = 1 << 31
+MAX_FOSTER_SCANS = 1 << 24
+# Each container nested in another is digested on its own, so the digests
+# cost up to the nesting depth times the document. Containers nest only when
+# content copies a labelled message.
+MAX_NESTED_CONTAINERS = 4
+# Longer than any issued token: an issued one is under 1 KiB unless its
+# ``on_behalf_of`` is exceptionally long.
+MAX_TOKEN_CHARS = 8192
 
 # Not ``s``, ``del``, ``ins``, ``sub`` or ``sup``: each changes what the text
 # says ("We <s>approve</s>", "10<sup>6</sup>") without changing the digest.
@@ -147,7 +164,7 @@ _EtreeBuilder: Any = html5lib.getTreeBuilder("etree", fullTree=True)
 
 
 class _TreeBuilder(_EtreeBuilder):
-    """html5lib's etree builder, recording foster parenting, capping depth and size.
+    """html5lib's etree builder, recording foster parenting, capping depth, size and work.
 
     Every foster-parenting insertion goes through
     ``getTableMisnestedNodePosition``; the table it moves content in front of
@@ -157,11 +174,22 @@ class _TreeBuilder(_EtreeBuilder):
     max_depth = MAX_DEPTH
     max_elements = MAX_ELEMENTS
     max_bytes = MAX_DOCUMENT_BYTES
+    max_copied = MAX_COPIED_CHARACTERS
+    max_scans = MAX_FOSTER_SCANS
 
     def reset(self) -> None:
         super().reset()
         self.fostered: list[Element] = []
         self.inserted = 0
+        self.copied = 0
+        self.scans = 0
+
+    def charge(self, copied: int) -> None:
+        """Count ``copied`` characters of string building against ``max_copied``."""
+        self.copied += copied
+        if self.copied > self.max_copied:
+            msg = f"parsing the HTML copies more than {self.max_copied} characters"
+            raise UnparseableHtmlError(msg)
 
     def insertElementNormal(self, token: Any) -> Any:
         self._check_depth()
@@ -171,10 +199,38 @@ class _TreeBuilder(_EtreeBuilder):
         self._check_depth()
         return super().insertElementTable(token)
 
+    def insertText(self, data: str, parent: Any = None) -> None:
+        # html5lib appends ``data`` to the text or the last child's tail; a
+        # foster-parented insertion is charged where its position is found.
+        fostering = (
+            self.insertFromTable
+            and self.openElements[-1].name in tableInsertModeElements
+        )
+        if not fostering:
+            element = (self.openElements[-1] if parent is None else parent)._element
+            text = element[-1].tail if len(element) else element.text
+            self.charge(len(data) + len(text or ""))
+        super().insertText(data, parent)
+
     def getTableMisnestedNodePosition(self) -> Any:
         parent, insert_before = super().getTableMisnestedNodePosition()
         anchor = insert_before if insert_before is not None else parent
         self.fostered.append(anchor._element)
+        # html5lib lists the foster parent's children to insert before the
+        # table, and may append to the text in front of it; so does this.
+        element = parent._element
+        self.scans += 2 * len(element)
+        if self.scans > self.max_scans:
+            msg = f"placing foster-parented content scans more than {self.max_scans} elements"
+            raise UnparseableHtmlError(msg)
+        children = list(element)
+        index = (
+            children.index(insert_before._element)
+            if insert_before is not None
+            else len(children)
+        )
+        text = children[index - 1].tail if index else element.text
+        self.charge(len(text or ""))
         return parent, insert_before
 
     def _check_depth(self) -> None:
@@ -188,11 +244,30 @@ class _TreeBuilder(_EtreeBuilder):
 
 
 class _Tokenizer(HTMLTokenizer):
-    """html5lib's tokenizer, capping the attributes on one tag.
+    """html5lib's tokenizer, capping the attributes on one tag and charging its work.
 
     html5lib checks each new attribute against every earlier one on the tag,
     so the cost of one tag grows with the square of its attribute count.
     """
+
+    def __iter__(self) -> Any:
+        # html5lib's own loop, plus a charge per step for the string the
+        # token being built holds: a step appends to it at most once.
+        self.tokenQueue = deque([])
+        parser: Any = self.parser
+        tree = parser.tree
+        finished = None
+        while self.state():
+            token = self.currentToken
+            if token is not None and token is not finished:
+                tree.charge(_building_length(token))
+            while self.stream.errors:
+                yield {"type": _PARSE_ERROR, "data": self.stream.errors.pop(0)}
+            while self.tokenQueue:
+                queued = self.tokenQueue.popleft()
+                if queued is token:
+                    finished = token
+                yield queued
 
     def beforeAttributeNameState(self) -> bool:
         result = super().beforeAttributeNameState()
@@ -210,6 +285,23 @@ class _Tokenizer(HTMLTokenizer):
         if isinstance(data, list) and len(data) > MAX_ATTRIBUTES:
             msg = f"a tag carries more than {MAX_ATTRIBUTES} attributes"
             raise UnparseableHtmlError(msg)
+
+
+_PARSE_ERROR = tokenTypes["ParseError"]
+_COMMENT_TOKEN = tokenTypes["Comment"]
+_DOCTYPE_TOKEN = tokenTypes["Doctype"]
+
+
+def _building_length(token: dict[str, Any]) -> int:
+    """Characters in the strings an unfinished token is being built into."""
+    kind = token.get("type")
+    if kind == _COMMENT_TOKEN:
+        return len(token.get("data") or "")
+    if kind == _DOCTYPE_TOKEN:
+        return sum(len(token.get(k) or "") for k in ("name", "publicId", "systemId"))
+    data = token.get("data")
+    last = data[-1] if isinstance(data, list) and data else ("", "")
+    return len(token.get("name") or "") + len(last[0]) + len(last[1])
 
 
 class _Parser(html5lib.HTMLParser):
@@ -467,13 +559,21 @@ def _percent_encode(text: str, extra: frozenset[str]) -> str:
 
 @dataclass
 class ContentRegion:
-    """A ``data-ai-content`` container found in a document."""
+    """A ``data-ai-content`` container found in a document.
+
+    Its items are ``stream[start:end]``: the walk stores each item once, in
+    the document's stream, however many containers hold it.
+    """
 
     mid: str
     text_before: bool
     in_blockquote: bool
     nested: bool
-    items: list[tuple[str, str]] = field(default_factory=list)
+    stream: list[tuple[str, str]] = field(default_factory=list, repr=False)
+    start: int = 0
+    end: int | None = None
+    _form: str | None = field(default=None, init=False, repr=False)
+    _digests: dict[str, str] = field(default_factory=dict, init=False, repr=False)
 
     @property
     def leads(self) -> bool:
@@ -481,9 +581,29 @@ class ContentRegion:
         return not (self.text_before or self.in_blockquote or self.nested)
 
     @property
+    def items(self) -> list[tuple[str, str]]:
+        """The text, URL and attribute-text items inside the container."""
+        return self.stream[self.start : self.end]
+
+    @property
     def canonical(self) -> str:
-        """The region's content in canonical form."""
-        return _canonical(self.items)
+        """The region's content in canonical form, computed once."""
+        if self._form is None:
+            self._form = _canonical(self.items)
+        return self._form
+
+    def digest(self, canon: str) -> str:
+        """The digest of the region's content under ``canon``, computed once per canon.
+
+        Raises:
+            ValueError: ``canon`` is not a message canonicalisation.
+
+        """
+        if canon not in self._digests:
+            self._digests[canon] = digest_of_canonical(
+                canonical_as(self.canonical, canon)
+            )
+        return self._digests[canon]
 
 
 @dataclass(frozen=True)
@@ -522,23 +642,32 @@ class DocumentScan:
     violations: list[Violation]
     # Content elements, and text, URL and attribute-text items that are not
     # blank, by the mid of the outermost container they sit in (None: in
-    # none). Scaffolding and the marker block are not counted. Counting,
-    # rather than comparing canonical lengths, keeps a combining mark after a
-    # container from composing into its last character unseen.
+    # none). Scaffolding and hidden blocks in their issued shape are not
+    # counted. Counting, rather than comparing canonical lengths, keeps a
+    # combining mark after a container from composing into its last
+    # character unseen.
     elements: dict[str | None, int]
     content_items: dict[str | None, int]
+    # Hidden blocks in their issued shape, by the ``mid`` their token names.
+    hidden_blocks: dict[str, int] = field(default_factory=dict)
 
     def has_content_outside(self, region: ContentRegion) -> bool:
         """True when the document has text, URLs or elements the region does not hold.
 
         Any element counts, even one with no text or URL: an empty list item
         numbers itself, a run of line breaks pushes the content off screen.
+        Of the hidden blocks, only one naming the region's ``mid`` is not
+        content: any other can carry text for a reader of the markup.
         """
-        return any(
-            count
-            for counts in (self.elements, self.content_items)
-            for mid, count in counts.items()
-            if mid != region.mid
+        return (
+            any(
+                count
+                for counts in (self.elements, self.content_items)
+                for mid, count in counts.items()
+                if mid != region.mid
+            )
+            or self.hidden_blocks.get(region.mid, 0) > 1
+            or any(mid != region.mid for mid in self.hidden_blocks)
         )
 
 
@@ -548,7 +677,8 @@ def scan_html(document: str) -> DocumentScan:
     Raises:
         UnparseableHtmlError: The document is over one of the caps
             (``MAX_DOCUMENT_BYTES``, ``MAX_DEPTH``, ``MAX_ATTRIBUTES``,
-            ``MAX_ELEMENTS``), or the parser or the walk failed on it.
+            ``MAX_ELEMENTS``, ``MAX_COPIED_CHARACTERS``, ``MAX_FOSTER_SCANS``,
+            ``MAX_NESTED_CONTAINERS``), or the parser or the walk failed on it.
 
     """
     root, fostered = _parse_document(document, _TreeBuilder)
@@ -572,6 +702,7 @@ def _scan(root: Element, fostered: list[Element]) -> DocumentScan:
         violations=walker.violations,
         elements=walker.elements,
         content_items=walker.content_items,
+        hidden_blocks=walker.hidden_blocks,
     )
 
 
@@ -620,6 +751,18 @@ def _safelinks_target(url: str) -> str | None:
     return None
 
 
+def _token_mid(value: str) -> str | None:
+    """The ``mid`` claim of ``value`` read as a compact JWS, unverified; else None."""
+    if len(value) > MAX_TOKEN_CHARS:
+        return None
+    try:
+        payload = decode_compact(value).payload
+    except MalformedTokenError:
+        return None
+    mid = payload.get("mid")
+    return mid if isinstance(mid, str) else None
+
+
 def _is_blank(text: str) -> bool:
     return all(char in _ASCII_WHITESPACE for char in text)
 
@@ -644,6 +787,7 @@ class _Walker:
         self.violations: list[Violation] = []
         self.elements: dict[str | None, int] = {}
         self.content_items: dict[str | None, int] = {}
+        self.hidden_blocks: dict[str, int] = {}
         self._fostered: dict[int, int] = {}
         for anchor in fostered:
             self._fostered[id(anchor)] = self._fostered.get(id(anchor), 0) + 1
@@ -670,6 +814,9 @@ class _Walker:
             # one means the tree is not what the parser was assumed to build.
             msg = "content moved out of a table could not be placed"
             raise UnparseableHtmlError(msg)
+        for region in self.regions.values():
+            if region.end is None:
+                region.end = len(self.items)
 
     def _visit(
         self,
@@ -730,7 +877,9 @@ class _Walker:
             self._violation(local)
         attributes = element.attrib
         if MARKER_ATTR in attributes:
-            if self._is_marker_block(element, attributes):
+            mid = self._marker_block_mid(element, attributes)
+            if mid is not None:
+                self.hidden_blocks[mid] = self.hidden_blocks.get(mid, 0) + 1
                 return False
             self._violation(f"{local}[{MARKER_ATTR}]")
             return True
@@ -748,9 +897,15 @@ class _Walker:
                 self._violation(f"{local}[{name}]")
         return content
 
-    def _is_marker_block(self, element: Element, attributes: dict[str, str]) -> bool:
-        """The hidden block exactly as issued: outside any container and empty."""
-        return (
+    def _marker_block_mid(
+        self, element: Element, attributes: dict[str, str]
+    ) -> str | None:
+        """The ``mid`` a hidden block in its issued shape names, else None.
+
+        As issued, the block is outside any container, empty, and carries a
+        compact JWS; any other value is free text a reader of the markup sees.
+        """
+        if not (
             element.tag == "div"
             and attributes.keys() == {MARKER_ATTR, "style", "aria-hidden"}
             and attributes["style"] == MARKER_STYLE
@@ -758,7 +913,9 @@ class _Walker:
             and not self._open
             and not element.text
             and len(element) == 0
-        )
+        ):
+            return None
+        return _token_mid(attributes[MARKER_ATTR])
 
     def _enter(
         self, element: Element, local: str, context: _Context, *, html_element: bool
@@ -776,11 +933,18 @@ class _Walker:
             # changes how it is shown without changing its text.
             if context.parent != "body":
                 self._violation("#content-not-in-body")
+            if len(self._open) >= MAX_NESTED_CONTAINERS:
+                msg = (
+                    f"content containers nested more than {MAX_NESTED_CONTAINERS} deep"
+                )
+                raise UnparseableHtmlError(msg)
             region = ContentRegion(
                 mid=mid,
                 text_before=self._seen_content,
                 in_blockquote=bool(self._blockquotes),
                 nested=bool(self._open),
+                stream=self.items,
+                start=len(self.items),
             )
             self.regions[mid] = region
             self._open.append((region, element))
@@ -789,7 +953,8 @@ class _Walker:
         if self._blockquotes and self._blockquotes[-1] is element:
             self._blockquotes.pop()
         if self._open and self._open[-1][1] is element:
-            self._open.pop()
+            region, _ = self._open.pop()
+            region.end = len(self.items)
 
     def _violation(self, name: str) -> None:
         containers = tuple(region.mid for region, _ in self._open)
@@ -809,8 +974,6 @@ class _Walker:
 
     def _emit(self, kind: str, value: str) -> None:
         self.items.append((kind, value))
-        for region, _ in self._open:
-            region.items.append((kind, value))
         if kind != "text" or _TEXT_WHITESPACE.sub("", _CONTROLS.sub("", value)):
             self._seen_content = True
             outermost = self._open[0][0].mid if self._open else None

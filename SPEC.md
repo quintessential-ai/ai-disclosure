@@ -88,9 +88,10 @@ in front of the table. The footer is `<p><small><em>…</em></small></p>`, with
 no styling. The issuer computes the digest from the wrapped container, read
 as a verifier reads it, so the digest covers exactly what is sent.
 
-The issuer's depth and element caps are 64 below a verifier's, and its size
-cap 64 KiB below, so what it signs, with the hidden block and a sender's
-`html` and `body` around it, always parses for a verifier. Content over the
+The issuer's depth and element caps are 64 below a verifier's, its size cap
+64 KiB below, and its copying and foster-parenting budgets half a
+verifier's, so what it signs, with the hidden block and a sender's `html`
+and `body` around it, always parses for a verifier. Content over the
 issuer's caps in [Parsing](#parsing), content the parser fails on, and
 content that, wrapped in the container and parsed again, does not write back
 to exactly the bytes being sent (html5lib builds a few such trees, such as an
@@ -230,8 +231,15 @@ carries must pass the same check.
 - the hidden block is a `div` with exactly three attributes:
   `data-ai-disclosure`, `style` with the exact string `display:none` (not
   parsed as CSS), and `aria-hidden="true"`. It is outside every container and
-  has no content. Any other element carrying `data-ai-disclosure`, or a
-  block in any other shape, is a violation.
+  has no content, and its `data-ai-disclosure` holds a compact JWS of at
+  most 8,192 characters: three base64url parts, the first two decoding to
+  JSON objects. Any other element carrying `data-ai-disclosure`, or a block
+  in any other shape, a block holding any other value included, is a
+  violation. A browser hides the block, but a program reading the markup
+  sees its value, so only one block naming the original's `mid` (its
+  payload's `mid` claim, read without verifying it) is the message's own;
+  every other block in this shape is content outside the original container
+  (step 7 of [Verifying a message](#verifying-a-message)).
 
 **Also violations:** every comment, including Outlook's conditional
 comments (`<!--[if mso]>…<![endif]-->` and `<!--[if !mso]><!-->…<!--<![endif]-->`),
@@ -279,10 +287,24 @@ A document is *unparseable* when the parser fails on it or it exceeds a cap:
 - a UTF-8 encoding longer than 5 MiB (5,242,880 bytes);
 - elements nested more than 256 deep, counting `html` and `body`;
 - more than 64 attributes on one tag;
-- more than 200,000 elements, counting each one the parser creates.
+- more than 200,000 elements, counting each one the parser creates;
+- content containers nested more than 4 deep, counting each `div` that
+  opens a new `mid` inside another.
 
 The caps bound parse time: html5lib's cost grows with the square of the
-nesting depth and of the attributes on one tag.
+nesting depth and of the attributes on one tag, and each nested container
+is digested on its own.
+
+The reference implementation also refuses a document on which html5lib's
+cost would grow with the square of the input. html5lib builds each text
+node, attribute value, comment and name by appending to a string, and
+places each piece of foster-parented content by scanning the foster
+parent's children. The reference stops when, summed over the parse, the
+length of the token being built at each tokenizer step and of the text
+each insertion extends passes 2^31 characters, or the children scanned
+placing foster-parented content pass 2^24. Mail stays far below both. They
+bound this parser's cost, not the document, so another parser need not
+apply them.
 
 ### Walk
 
@@ -476,8 +498,8 @@ target, image source, link title or image description changes it.
    that step 2 of [Canonical string](#canonical-string) keeps, or does the
    message have any element outside the original container other than the
    scaffolding (`html`,
-   `head`, `body`, and `title` or `meta` in `head`) and hidden blocks in
-   their issued shape? Then the message has content outside it, even
+   `head`, `body`, and `title` or `meta` in `head`) and one hidden block in
+   its issued shape naming the original's `mid`? Then the message has content outside it, even
    without text: an empty list item numbers itself, a run of line breaks
    pushes the content off screen. A reply's quoted conversation is such
    content, and so is anything added around a copied fragment, in the head
@@ -552,7 +574,10 @@ prove nothing.
 1. Before reading any part, reject a package with a part that is encrypted or
    neither stored nor deflated, the only methods OPC allows. The reference
    issuer and checker also reject a package with more than 10,000 entries
-   (directories included) or more than 512 MiB of declared uncompressed size.
+   (directories included) or more than 512 MiB of declared uncompressed size,
+   and a `_rels/.rels`, `[Content_Types].xml` or custom-properties part
+   declaring more than 4 MiB; only those three are read whole, every other
+   part is hashed as it is read.
    Reject duplicate part names, XML entity declarations, and ambiguous or
    external custom-properties relationships. Select the custom-properties part
    from the package relationship, defaulting to `docProps/custom.xml` when no

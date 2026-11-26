@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import io
 import json
 import tracemalloc
@@ -207,6 +209,75 @@ def test_a_part_declaring_less_than_it_holds_is_read_only_that_far(
         tracemalloc.stop()
 
     assert peak < big // 8
+
+
+def _spec_digest(package: bytes) -> str:
+    """``ooxml-parts/1`` for a package without a custom-properties relationship."""
+
+    def b64(data: bytes) -> str:
+        return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+    with zipfile.ZipFile(io.BytesIO(package)) as zf:
+        names = sorted(n for n in zf.namelist() if n != "docProps/custom.xml")
+        listing = "".join(
+            f"{n}\n{b64(hashlib.sha256(zf.read(n)).digest())}\n" for n in names
+        )
+    return b64(hashlib.sha256(listing.encode()).digest())
+
+
+def test_a_large_part_is_hashed_without_holding_it() -> None:
+    big = 64 * 1024 * 1024
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("word/document.xml", "<w:document/>")
+        zf.writestr("word/media/video.bin", bytes(big))
+    package = buf.getvalue()
+    expected = _spec_digest(package)
+
+    tracemalloc.start()
+    try:
+        digest = files.ooxml_digest(package)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert digest == expected
+    assert peak < big // 16
+
+
+@pytest.mark.parametrize("part", ["[Content_Types].xml", "_rels/.rels"])
+def test_a_routing_part_over_its_cap_is_refused_before_reading(
+    docx: bytes, part: str
+) -> None:
+    # Declared over the cap, the part is refused before a byte of it is read.
+    oversized = _declaring(docx, part, files.MAX_XML_PART_BYTES + 1)
+
+    with pytest.raises(ValueError, match="routing or metadata part"):
+        files.ooxml_digest(oversized)
+    if part == "_rels/.rels":
+        with pytest.raises(MessageDecodeError, match="routing or metadata part"):
+            detect_file(oversized, KEYS)
+    else:
+        report = detect_file(oversized, KEYS)
+        assert report.findings[0].content is ContentCheck.NOT_FOUND
+
+
+def test_deeply_nested_routing_reads_as_content_not_found(docx: bytes) -> None:
+    depth = 5000
+    content_types = (
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        + "<x>" * depth
+        + "</x>" * depth
+        + "</Types>"
+    )
+    nested = _repack(docx, {"[Content_Types].xml": content_types.encode()})
+
+    with pytest.raises(ValueError, match="nested"):
+        files.ooxml_digest(nested)
+    report = detect_file(nested, KEYS)
+
+    assert report.findings[0].content is ContentCheck.NOT_FOUND
+    assert report.verdict is Verdict.UNVERIFIED
 
 
 def test_a_part_neither_stored_nor_deflated_is_refused(docx: bytes) -> None:
