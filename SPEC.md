@@ -125,7 +125,12 @@ this can happen is measured.
 ## Token
 
 The token is a compact JWS ([RFC 7515](https://www.rfc-editor.org/rfc/rfc7515))
-with a JSON payload.
+with a JSON payload. Each of its three parts is unpadded base64url in its one
+canonical spelling: the unused low bits of the last character are zero. The
+header and the payload are UTF-8 JSON objects
+([RFC 8259](https://www.rfc-editor.org/rfc/rfc8259)) with no member name
+repeated in any object and no `NaN` or `Infinity`. A token that is not is
+malformed, and is never verified.
 
 ### Protected header
 
@@ -135,7 +140,10 @@ with a JSON payload.
 | `typ` | `ai-disclosure+jwt` |
 | `kid` | Key id of the signing key; absent when `alg` is `none` |
 
-No other header members are used. A token carrying `crit` is invalid.
+A token whose header has any other member is invalid, whatever its
+signature: `crit` and `b64` among them, and `jku`, `jwk`, `x5u` or `x5c`,
+which could name a key outside the published set. So is a token whose `kid`
+is not a string.
 
 ### Payload
 
@@ -341,9 +349,15 @@ canonicalisation writes any URL.
 
 This is the WHATWG URL Standard's serialisation (the `href` its parser gives)
 for the http and https URLs it covers, written out so a verifier needs no URL
-library. A URL it does not cover is kept as it is after step 3. The
-reference implementation is checked against WHATWG's own URL test data: every
-http or https input it serialises gives WHATWG's `href`.
+library. A URL it does not cover is kept as it is after step 3.
+
+The reference implementation is tested against the http and https entries
+of web-platform-tests' URL test data (`url/resources/urltestdata.json` at
+commit `065d99ab62bf0b6ca04907f423625801c350edb2`): every input it serialises
+gives the entry's `href`, it serialises none the data marks as a failure, and
+it keeps the rest as written. The Standard percent-encodes `^` in a path, but
+not in a query or fragment; some URL libraries keep it in a path too
+(Node.js 22's does; Node.js 25's encodes it).
 
 A URL is **kept as written** when any of these holds:
 
@@ -596,10 +610,23 @@ an OKP JWK with `crv: Ed25519`, `use: sig` and `alg: EdDSA`. A retired key
 stays in the set for as long as messages it signed may need verifying; a
 compromised key is removed and its markers are no longer verifiable.
 
+A verifier skips an entry it cannot use, as RFC 7517 section 5 asks, rather
+than rejecting the set: a `kty` other than `OKP` or `crv` other than
+`Ed25519`, a `use` other than `sig`, an `alg` other than `EdDSA`, `key_ops`
+without `verify`, a `kid` that is not a string, or an `x` that is not the
+canonical base64url of 32 bytes. An entry without a `kid` is named by its
+thumbprint. A `kid` is a name, so it is not compared with the thumbprint
+(RFC 7517 section 4.5 leaves it opaque): the set itself is what is trusted.
+A `kid` that two usable entries share names no key, since either could be
+meant.
+
 The key set is published at
 <https://ai-disclosure.complexio.com/.well-known/ai-disclosure-jwks.json>, served
 as `application/jwk-set+json` and open to cross-origin reads. Its address does
-not change when keys are added or retired.
+not change when keys are added or retired. A verifier follows a redirect only
+to another `https` address, and bounds the whole fetch with one deadline, not
+only each read. The site refuses some HTTP libraries' default `User-Agent`
+(Python's `Python-urllib/3.x` gets HTTP 403), so a client names itself.
 
 ## Versioning
 
@@ -666,6 +693,28 @@ on it nor reports on it.
 An email is a container with its own metadata, so marking is done there: a
 signed token in the message headers and in the HTML body, bound to the text
 by its digest.
+
+## Test vectors
+
+`ai_disclosure_vectors.json`, published with this specification, is generated
+by the reference implementation. `jwks` is the public key set of a test key
+that signs nothing else.
+
+| Section | Each vector holds | A verifier reproduces |
+| --- | --- | --- |
+| `canonical` | An HTML fragment and the fragment as the issuer balances it (`balanced`) | For `balanced` inside a content container: the canonical string, `content_sha256` and the first violation inside the container |
+| `label` | An unsigned label as issued: `html_body` and its `token` | `ai_marked_unverified` with one unsigned marker whose content matches; the canonical string and `content_sha256` |
+| `signed_as_written` | Content as issued, `content_html`, and its `token`, signed with the test key | With `jwks`: a valid signature, the `content` result, the `verdict` and the first violation |
+| `detection` | `html_body`, an optional `header_token` (`X-Complexio-AI-Disclosure`) and `x_ai_generated` (`X-AI-Generated`), and `jwks`: whether the verifier holds the test key set or none | The `verdict`, `unmarked_content`, the first violation, and in order each marker's carrier, placement, signature and content results, whether its token was `rejected` (a malformed token, or a header or claims outside [Token](#token)) and whether it is in the `legacy` format |
+
+The `detection` vectors are mostly ways a marker must fail to verify: content
+changed, removed or not leading, a header token for other content, an
+unsupported canonicalisation, a forged signature, an unknown key,
+`alg: none` with or without a signature, `HS256` keyed with the public key,
+`Ed25519` as `alg`, `crit`, `b64`, `jku`, a `kid` that is not a string, a
+repeated header member or claim, `NaN`, a non-canonical signature spelling,
+each claim rule, unparseable tokens, an earlier-format marker, an
+`X-AI-Generated` header alone, and HTML nested too deep.
 
 ## Reference implementation
 
