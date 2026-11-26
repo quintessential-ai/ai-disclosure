@@ -21,7 +21,7 @@ dev = [
 requires-dist = [
     { name = "cryptography", specifier = ">=43" },
     { name = "defusedxml", specifier = ">=0.7.1" },
-    { name = "html5lib", specifier = ">=1.1" },
+    { name = "html5lib", specifier = ">=1.1,<1.2" },
 ]
 
 [package.metadata.requires-dev]

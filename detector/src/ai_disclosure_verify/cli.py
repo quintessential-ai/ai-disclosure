@@ -1,19 +1,21 @@
 """The ``ai-disclosure-verify`` command.
 
-``ai-disclosure-verify FILE [--jwks JWKS | --offline] [--json]`` reads an
-``.eml`` message or an HTML body and reports, in plain language or as JSON,
-every marker it carries and what its verdict means.
+``ai-disclosure-verify FILE [--jwks JWKS | --offline] [--timeout SECONDS] [--json]``
+reads an ``.eml`` message, an HTML body, an Office file or a PDF and reports,
+in plain language or as JSON, every marker it carries and what its verdict
+means.
 
 Exit status: 0 when the message's own marker verifies and covers all its
 text, 4 when it verifies but the message carries markup outside the allowlist,
-or anything outside its content, that it does not vouch for, 1 when no marker
-is present, 2 when the input or key set cannot be read or the HTML is
-unparseable, 3 when a marker is present but not verified (unsigned, bad or
-unknown signature, altered or displaced content, or only quoted copies).
+or anything outside its content, that it does not vouch for (always so for a
+PDF), 1 when no marker is present, 2 when the input or key set cannot be read
+(nested too deeply included) or the HTML is unparseable, 3 when a marker is
+present but not verified (unsigned, bad or unknown signature, altered or
+displaced content, or only quoted copies).
 
 Without ``--jwks`` the key set is fetched from ``keys.DEFAULT_JWKS_URL``,
-only if a signed marker needs it. ``--offline`` loads no key set, so signed
-markers read as not checked.
+only if a signed marker needs it; ``--timeout`` sets how long to wait for it.
+``--offline`` loads no key set, so signed markers read as not checked.
 """
 
 from __future__ import annotations
@@ -56,7 +58,9 @@ def main(argv: list[str] | None = None) -> int:
             "copies; 4 verified with unmarked content or markup."
         ),
     )
-    parser.add_argument("file", type=Path, help=".eml message or HTML body")
+    parser.add_argument(
+        "file", type=Path, help=".eml message, HTML body, Office file or PDF"
+    )
     keys = parser.add_mutually_exclusive_group()
     keys.add_argument(
         "--jwks",
@@ -83,6 +87,9 @@ def main(argv: list[str] | None = None) -> int:
         # must not look like that.
         sys.stderr.write(f"error: {exc}\n")
         return EXIT_ERROR
+    except RecursionError:
+        sys.stderr.write("error: the input is nested too deeply to read\n")
+        return EXIT_ERROR
 
 
 def _verify(
@@ -98,7 +105,9 @@ def _verify(
         keys = LazyKeys(lambda: fetch_jwks(timeout=timeout))
     report = detect_file(data, keys)
     if as_json:
-        output = json.dumps(report.to_dict(), indent=2, ensure_ascii=False)
+        # ASCII only: a control character or bidirectional override in a
+        # claim reaches the terminal escaped.
+        output = json.dumps(report.to_dict(), indent=2, ensure_ascii=True)
     else:
         output = report.describe()
     sys.stdout.write(output + "\n")

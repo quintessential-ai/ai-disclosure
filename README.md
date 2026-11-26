@@ -26,8 +26,11 @@ pip install ./ai-disclosure/detector
 ai-disclosure-verify message.eml
 ```
 
-The command prints one of the results below and what it means. It fetches the public key set
-over HTTPS by default, only when the message carries a signed label. To check against a local
+The command prints one of the results below and what it means. It also reads an HTML body, an
+Office file (`.docx`, `.xlsx`, `.pptx`) or a PDF written by Complexio Stevie.
+
+It fetches the public key set over HTTPS by default, only when the message carries a signed
+label (`--timeout SECONDS` sets how long it waits; the default is 10). To check against a local
 copy of the key set, or without the network:
 
 ```
@@ -43,8 +46,8 @@ ai-disclosure-verify message.eml --offline      # signed labels read as `ai_mark
 
 | Result | What it means |
 | --- | --- |
-| `verified` | The label is genuine. Complexio's system wrote the message and signed it, and nothing in the message has changed since. The message contains nothing else. |
-| `verified_with_unmarked_content` | The label is genuine and the signed text has not changed. But the message also carries something the label does not cover, so do not treat that part as covered: for example, a quoted earlier email, or formatting that could change how the text is shown. |
+| `verified` | The label is genuine: Complexio's system wrote the message and signed it. Its words and links are the ones signed, and the message contains nothing else. The check ignores spacing (`1 000` and `1000` read the same) and how the text is laid out, and it checks where each link goes, not how much of the text the link covers. |
+| `verified_with_unmarked_content` | The label is genuine and the signed words and links have not changed. But the message also carries something the label does not cover, so do not treat that part as covered: for example, a quoted earlier email, formatting that could change how the text is shown, or another part of the email, such as a plain-text version that differs. A PDF never reads better than this (see below). |
 | `ai_marked_unverified` | The message says it was written by an AI system, but the check could not confirm the label. For example, the text was changed after it was signed, or the label is not signed. |
 | `quoted_only` | This message is not labelled itself. It only quotes an earlier labelled message. |
 | `no_marker` | The message carries no AI-disclosure label. |
@@ -52,6 +55,10 @@ ai-disclosure-verify message.eml --offline      # signed labels read as `ai_mark
 
 A result other than `verified` never means a person wrote the message. It only means the check
 cannot confirm the label.
+
+A PDF's label is written as an update appended to the finished file, and the label cannot sign
+the update that carries it. Anything else in that update, page changes included, is not
+covered, so a genuine PDF label reads `verified_with_unmarked_content`, never `verified`.
 
 Until a deployment's signing key is published in the key set, its labels are unsigned, and
 every check of its mail reads `ai_marked_unverified`.

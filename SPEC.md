@@ -482,6 +482,20 @@ target, image source, link title or image description changes it.
    pushes the content off screen. A reply's quoted conversation is such
    content, and so is anything added around a copied fragment, in the head
    included.
+
+   In an email, the HTML body is the part a MIME reader takes as the body
+   when it prefers HTML (the reference implementation uses Python's
+   `EmailMessage.get_body`). Every other leaf part a reader may see is also
+   content outside the original container: any part that is not marked
+   `Content-Disposition: attachment` and is not inside such a part, for
+   example a second HTML part, an inline image, an inline forwarded message,
+   or a plain-text alternative. The one exception is a `text/plain` part
+   whose text, read as one text item under step 2 of
+   [Canonical string](#canonical-string), equals the original container's
+   text items, in order, read as one text item. Link targets and attribute
+   text are not compared, and a part whose text cannot be decoded counts.
+   An attachment is a file of its own: the marker does not cover it, and it
+   does not change the verdict.
 8. Place each violation inside or outside the original container.
 
 A signature vouches for the text of one container, not for the message
@@ -490,8 +504,8 @@ Verdicts:
 
 | Verdict | Meaning |
 | --- | --- |
-| `verified` | The original marker is valid, its digest matches, its container holds only allowlisted markup, and outside it the message holds nothing but empty scaffolding (`html`, `head`, `body`, an allowed `meta`, an empty `title`) and the hidden block. |
-| `verified_with_unmarked_content` | The signed text is intact, but styling or markup in or around it, which could change how it is shown, is not vouched for, nor is the rest of the message. The original marker is valid and its digest matches, but its container holds a violation of the markup allowlist (styling, a class, a comment, an element outside the list), or the message has content outside its container (text, links, images or any other element), or violations outside it (a quoted conversation, a head style sheet, a conditional comment, content added around a copied fragment). None of that may be attributed to the marker. |
+| `verified` | The original marker is valid, its digest matches, its container holds only allowlisted markup, and outside it the message holds nothing but empty scaffolding (`html`, `head`, `body`, an allowed `meta`, an empty `title`) and the hidden block. In an email, no other part a reader may see differs (step 7). The words and links are the signed ones; the digest does not cover whitespace, presentation, or how much text a link spans (see [Transport limits](#transport-limits)). |
+| `verified_with_unmarked_content` | The signed text is intact, but styling or markup in or around it, which could change how it is shown, is not vouched for, nor is the rest of the message. The original marker is valid and its digest matches, but its container holds a violation of the markup allowlist (styling, a class, a comment, an element outside the list), or the message has content outside its container (text, links, images or any other element, or another part of an email), or violations outside it (a quoted conversation, a head style sheet, a conditional comment, content added around a copied fragment). None of that may be attributed to the marker. A verified PDF always reads this way (see [Verifying a file](#verifying-a-file)). |
 | `ai_marked_unverified` | The message carries its own marker but it does not verify: unsigned, bad or unknown signature, rejected token, content changed after signing (for example, a draft a person edited before sending), or missing or non-leading content. Also returned for any `X-AI-Generated` header, whatever its value, and for an earlier-format marker anywhere in the message, a quoted trail included (see below). A reply that merely quotes an earlier-format message therefore reads `ai_marked_unverified`; a caller checking mail it did not label itself must not read this verdict as "this message was labelled". |
 | `quoted_only` | Every marker is a quoted copy; the message quotes a marked message but was not itself marked. |
 | `no_marker` | No marker found. |
@@ -634,6 +648,18 @@ mismatch.
   table layout and list items. A `verified` verdict says
   the words and links are the signed ones, not that they look as they did
   when signed.
+- The digest removes every whitespace character from text, so text that
+  differs only in spacing has the same digest: `1 000`, `10 00` and `1000`
+  read the same, and so do `can not` and `cannot`. A link enters the digest
+  as its target, at the point where the link starts, not as the text it
+  spans: an anchor can be stretched over neighbouring visible text, or
+  shrunk, without changing the digest.
+- A mail system may add a plain-text alternative written from the HTML. If
+  it writes link targets, list markers or other text of its own into it,
+  that part differs from the signed text, and the message reads
+  `verified_with_unmarked_content` (step 7 of
+  [Verifying a message](#verifying-a-message)). Whether Exchange adds such a
+  part, and how it writes it, has not been confirmed on a received sample.
 - Exchange and Outlook may rewrite a message's HTML in transit or on reply.
   A reply composed by Exchange (`createReply`) carries the quoted
   conversation in Outlook's own markup, outside the signed container;
@@ -673,8 +699,9 @@ The Python package `ai-disclosure-verify` (import name `ai_disclosure_verify`)
 implements detection and verification only. It runs as:
 
 ```
-ai-disclosure-verify MESSAGE.eml [--jwks KEYS.json | --offline] [--json]
-ai-disclosure-verify BODY.html [--jwks KEYS.json | --offline] [--json]
+ai-disclosure-verify MESSAGE.eml [--jwks KEYS.json | --offline] [--timeout SECONDS] [--json]
+ai-disclosure-verify BODY.html [--jwks KEYS.json | --offline] [--timeout SECONDS] [--json]
+ai-disclosure-verify REPORT.docx [--jwks KEYS.json | --offline] [--timeout SECONDS] [--json]   # also .xlsx, .pptx, .pdf
 ```
 
 It prints the verdict and what it means in plain language, whether the
@@ -682,16 +709,46 @@ message has content outside the marker, the first violation of
 the markup allowlist and their count, and every marker found
 with its carrier, placement, signature and content results, each with a
 plain-language meaning (for a mismatch: content changed after signing).
-`--json` prints the same report as JSON. Exit status:
+`--json` prints the same report as JSON. Values taken from the message
+(claims, the key id, the `X-AI-Generated` header, markup names, reasons)
+are printed in quotes, with `\`, `"` and every unprintable character
+(controls, line separators, bidirectional overrides) written as a Python
+escape, so none can start a line of its own or reach the terminal as a
+control sequence. The JSON report is ASCII, every other character escaped.
+Exit status:
 
 | Status | Meaning |
 | --- | --- |
 | 0 | `verified` |
 | 1 | `no_marker` |
-| 2 | The message or key set could not be read (missing file, undecodable charset, malformed JWKS, key set not fetched), or `unparseable` |
+| 2 | The message or key set could not be read (missing file, undecodable charset, input nested too deeply, malformed JWKS, key set not fetched), or `unparseable` |
 | 3 | `ai_marked_unverified` or `quoted_only` |
-| 4 | `verified_with_unmarked_content` |
+| 4 | `verified_with_unmarked_content`, which includes every verified PDF |
 
-By default the key set is fetched over HTTPS from the published location.
-`--jwks` reads it from a local file instead. With `--offline` and no `--jwks`,
-no key set is loaded, so signatures are reported as not checked.
+By default the key set is fetched over HTTPS from the published location,
+only when a signed marker needs it; `--timeout` sets how long to wait for
+it, in seconds (default 10). `--jwks` reads it from a local file instead.
+With `--offline` and no `--jwks`, no key set is loaded, so signatures are
+reported as not checked.
+
+### Reading the input
+
+The detector tells the kind of input from its content, not its name, in
+this order:
+
+1. A zip signature (`PK` 03 04) at the start is an Office file; `%PDF-` at
+   the start is a PDF.
+2. After a UTF-8 byte-order mark and ASCII whitespace, `<` is an HTML body,
+   and a header field (a name of printable ASCII characters other than `:`,
+   then `:`, or an mbox `From ` line) is a message, read from that point.
+3. `%PDF-` within the first 1024 bytes is a PDF, as PDF readers accept;
+   failing that, a zip signature within them is an Office file.
+4. A tag anywhere (`<` followed by an ASCII letter, `/` or `!`) is an HTML
+   body, such as a fragment that starts with text.
+5. Anything else is a message.
+
+A fragment whose first line looks like a header field (`Note: …`) is read
+as a message, and the markers in it are not found. An Office file whose XML,
+or a message whose MIME parts, nest too deeply for the parsers is reported
+as unreadable (exit status 2), as an HTML body over the caps in
+[Parsing](#parsing) is `unparseable`; neither reads as `no_marker`.
