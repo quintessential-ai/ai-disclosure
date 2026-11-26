@@ -13,7 +13,14 @@ import json
 import sys
 from pathlib import Path
 
-from ai_disclosure_verify.jws import JwksError, jwk_thumbprint, keys_from_jwks
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+from ai_disclosure_verify.jws import (
+    JwksError,
+    b64url_decode,
+    jwk_thumbprint,
+    keys_from_jwks,
+)
 
 DEFAULT_PATH = (
     Path(__file__).resolve().parents[2]
@@ -21,6 +28,12 @@ DEFAULT_PATH = (
     / ".well-known"
     / "ai-disclosure-jwks.json"
 )
+
+
+def seen_twice(entries: list[object]) -> set[str]:
+    """The ``kid`` values that more than one entry carries."""
+    kids = [e.get("kid") for e in entries if isinstance(e, dict)]
+    return {k for k in kids if isinstance(k, str) and kids.count(k) > 1}
 
 
 def check_key_set(document: object) -> list[str]:
@@ -34,6 +47,9 @@ def check_key_set(document: object) -> list[str]:
     problems: list[str] = []
     seen: set[str] = set()
     for index, entry in enumerate(document["keys"]):
+        if not isinstance(entry, dict):
+            problems.append(f"key {index}: not a JSON object")
+            continue
         kid = entry.get("kid")
         name = f"key {index} (kid {kid!r})"
         if entry.get("kty") != "OKP" or entry.get("crv") != "Ed25519":
@@ -51,7 +67,16 @@ def check_key_set(document: object) -> list[str]:
         if kid in seen:
             problems.append(f"{name}: duplicate kid")
         seen.add(kid)
-        expected = jwk_thumbprint(keys[kid])
+        # Checkers skip an unusable entry instead of failing the set, so the
+        # thumbprint comes from the entry itself, not from keys_from_jwks.
+        try:
+            public = Ed25519PublicKey.from_public_bytes(b64url_decode(entry["x"]))
+        except (KeyError, TypeError, ValueError):
+            problems.append(f"{name}: 'x' is not a canonical Ed25519 public key")
+            continue
+        if kid not in keys and kid not in seen_twice(document["keys"]):
+            problems.append(f"{name}: checkers would skip this entry")
+        expected = jwk_thumbprint(public)
         if kid != expected:
             problems.append(f"{name}: kid is not the RFC 7638 thumbprint {expected}")
     return problems
