@@ -41,3 +41,7 @@ select = ["E", "F", "W", "I", "UP", "B"]
 
 [tool.ty.environment]
 python = ".venv"
+
+[tool.ty.src]
+# Runs against the reference implementation, which is not a dependency here.
+exclude = ["tests/fixtures/generate_fixtures.py"]
