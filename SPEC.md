@@ -535,8 +535,13 @@ prove nothing.
 
 ### `ooxml-parts/1`
 
-1. Reject duplicate part names, XML entity declarations, and ambiguous or
-   external custom-properties relationships. Select the custom-properties
+1. Before reading any part, reject a package with a part that is encrypted or
+   neither stored nor deflated, the only methods OPC allows. The reference
+   issuer and checker also reject a package with more than 10,000 entries
+   (directories included) or more than 512 MiB of declared uncompressed size,
+   so no package they sign exceeds those limits. Reject duplicate part names,
+   XML entity declarations, and ambiguous or external custom-properties
+   relationships. Select the custom-properties
    part from the package relationship, defaulting to `docProps/custom.xml`
    when no relationship exists. If present, its root must be the OOXML
    custom-properties `Properties` element.
@@ -551,12 +556,8 @@ prove nothing.
 4. `content_sha256` is the unpadded base64url SHA-256 of that text, UTF-8
    encoded.
 
-Recompressing or reordering the package keeps the digest; changing any
-part's content (text, numbers, styles, images) breaks it.
-
-The reference checker refuses, before reading any part, a package of more
-than 10,000 parts or 512 MiB uncompressed, or with a part neither stored nor
-deflated (the only methods OPC allows).
+Recompressing (stored or deflated) or reordering the package keeps the
+digest; changing any part's content (text, numbers, styles, images) breaks it.
 
 ### `pdf-revision/1`
 

@@ -62,13 +62,15 @@ def is_pdf(data: bytes) -> bool:
 
 def _package_infos(zf: zipfile.ZipFile) -> dict[str, zipfile.ZipInfo]:
     """The package's parts by name, refused on what they declare before any is read."""
-    infos = [info for info in zf.infolist() if not info.is_dir()]
+    entries = zf.infolist()
+    # Directory entries count too: each costs as much to hold as a part.
+    if len(entries) > MAX_PACKAGE_PARTS:
+        msg = f"Office package has more than {MAX_PACKAGE_PARTS} entries"
+        raise ValueError(msg)
+    infos = [info for info in entries if not info.is_dir()]
     by_name = {info.filename: info for info in infos}
     if len(by_name) != len(infos):
         msg = "duplicate Office package part"
-        raise ValueError(msg)
-    if len(infos) > MAX_PACKAGE_PARTS:
-        msg = f"Office package has more than {MAX_PACKAGE_PARTS} parts"
         raise ValueError(msg)
     if sum(info.file_size for info in infos) > MAX_PACKAGE_BYTES:
         msg = f"Office package is over {MAX_PACKAGE_BYTES} bytes uncompressed"

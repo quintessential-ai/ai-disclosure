@@ -147,18 +147,38 @@ def test_a_package_over_the_part_cap_is_refused(
     assert _cli(tmp_path, "report.docx", docx, jwks_file) == cli.EXIT_ERROR
 
 
-def _declaring(package: bytes, name: str, size: int) -> bytes:
-    """``package`` with ``name``'s central directory entry declaring ``size`` bytes."""
-    with zipfile.ZipFile(io.BytesIO(package)) as zf:
-        info = zf.getinfo(name)
+def test_directory_entries_count_toward_the_part_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("word/document.xml", "<w:document/>")
+        for index in range(5):
+            zf.writestr(zipfile.ZipInfo(f"empty-{index}/"), b"")
+    monkeypatch.setattr(files, "MAX_PACKAGE_PARTS", 5)
+
+    with pytest.raises(ValueError, match="more than"):
+        files.ooxml_digest(buf.getvalue())
+    with pytest.raises(MessageDecodeError, match="more than"):
+        detect_file(buf.getvalue(), KEYS)
+
+
+def _with_central_field(package: bytes, name: str, offset: int, value: int) -> bytes:
+    """``package`` with a 4-byte field of ``name``'s central directory entry set."""
     data = bytearray(package)
     # A central directory entry: its signature, 42 fixed bytes, then the name.
     entry = data.index(b"PK\x01\x02")
     while data[entry + 46 : entry + 46 + len(name)] != name.encode():
         entry = data.index(b"PK\x01\x02", entry + 4)
-    assert int.from_bytes(data[entry + 24 : entry + 28], "little") == info.file_size
-    data[entry + 24 : entry + 28] = size.to_bytes(4, "little")
+    data[entry + offset : entry + offset + 4] = value.to_bytes(4, "little")
     return bytes(data)
+
+
+def _declaring(package: bytes, name: str, size: int) -> bytes:
+    """``package`` with ``name``'s central directory entry declaring ``size`` bytes."""
+    with zipfile.ZipFile(io.BytesIO(package)) as zf:
+        assert zf.getinfo(name).file_size != size
+    return _with_central_field(package, name, 24, size)
 
 
 def test_a_package_over_the_size_cap_is_refused_before_reading(docx: bytes) -> None:
@@ -199,20 +219,15 @@ def test_a_part_neither_stored_nor_deflated_is_refused(docx: bytes) -> None:
         detect_file(buf.getvalue(), KEYS)
 
 
-def test_the_token_lookup_reads_only_the_relationships_and_custom_part(
-    docx: bytes, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    read: list[str] = []
-    real = files._read_part
+def test_the_token_lookup_does_not_read_the_document_parts(docx: bytes) -> None:
+    with zipfile.ZipFile(io.BytesIO(docx)) as zf:
+        crc = zf.getinfo("word/document.xml").CRC
+    # A corrupt document part fails only a reader that reads it.
+    corrupt = _with_central_field(docx, "word/document.xml", 16, crc ^ 1)
 
-    def spy(zf: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes:
-        read.append(info.filename)
-        return real(zf, info)
-
-    monkeypatch.setattr(files, "_read_part", spy)
-
-    assert files.ooxml_token(docx) is not None
-    assert read == ["_rels/.rels", "docProps/custom.xml"]
+    assert files.ooxml_token(corrupt) == files.ooxml_token(docx) is not None
+    with pytest.raises(zipfile.BadZipFile, match="CRC"):
+        files.ooxml_digest(corrupt)
 
 
 def test_a_byte_order_mark_before_html_does_not_hide_the_marker(
