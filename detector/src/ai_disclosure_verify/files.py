@@ -146,8 +146,9 @@ def ooxml_digest(data: bytes) -> str:
     removing the custom-properties relationship and its content-type override.
     Each sorted part contributes ``<name>\\n<base64url SHA-256>\\n``.
     Duplicate parts, unsafe XML and ambiguous metadata relationships are rejected.
-    So is a package over ``MAX_PACKAGE_PARTS`` parts or ``MAX_PACKAGE_BYTES``
-    uncompressed, or with a part neither stored nor deflated.
+    So is a package over ``MAX_PACKAGE_PARTS`` entries (directories included)
+    or ``MAX_PACKAGE_BYTES`` uncompressed, or with a part neither stored nor
+    deflated.
     """
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         parts = _package_parts(zf)
