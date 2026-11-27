@@ -418,10 +418,14 @@ def test_a_jwks_names_the_entries_it_skips(caplog: pytest.LogCaptureFixture) -> 
         keys = keys_from_jwks({"keys": [_jwk(), broken, twice, twice]})
 
     assert list(keys) == ["k"]
-    messages = [record.getMessage() for record in caplog.records]
-    assert messages == [
-        "JWKS entry 1: Ed25519 key not usable, skipped",
-        "JWKS kid 'twice' names more than one key, skipped",
+    # The kid comes from the key set, so it is a field, not message text.
+    logged = [
+        (r.getMessage(), getattr(r, "entry", None), getattr(r, "kid", None))
+        for r in caplog.records
+    ]
+    assert logged == [
+        ("JWKS Ed25519 entry not usable, skipped", 1, None),
+        ("JWKS kid names more than one key, skipped", None, "twice"),
     ]
 
 

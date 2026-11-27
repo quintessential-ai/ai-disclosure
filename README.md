@@ -65,10 +65,11 @@ the update that carries it. Anything else in that update, page changes included,
 covered, so a genuine PDF label reads `verified_with_unmarked_content`, never `verified`.
 
 An Office file's label covers its parts. Every other byte of the file belongs to the package's
-records, which hold no comment, no extra field other than Zip64's, and no data in a directory
-entry. Any other byte (text appended after the end of the file, a zip or entry comment, an
-extra field, or bytes between its entries) is not covered, and the file reads
-`verified_with_unmarked_content` (exit status 4).
+records, which hold no comment, no extra field other than Zip64's, and no directory entry, and
+each part's data is one stream of the sizes its records declare. Any other byte (text appended
+after the end of the file, a zip or entry comment, an extra field, a directory entry, or bytes
+between its entries) is not covered, and the file reads `verified_with_unmarked_content`
+(exit status 4).
 
 Until a deployment's signing key is published in the key set, its labels are unsigned, and
 every check of its mail reads `ai_marked_unverified`.

@@ -655,11 +655,9 @@ class DocumentScan:
     markers: list[BodyMarker]
     items: list[tuple[str, str]]
     violations: list[Violation]
-    # Content elements and non-blank text, URL and attribute-text items, by
-    # the mid of the outermost container holding them (None: none);
-    # scaffolding and issued-shape hidden blocks are not counted. Counted
-    # rather than compared by length, so a combining mark after a container
-    # cannot compose into it unseen.
+    # Content elements and items, by the mid of the outermost container
+    # holding them (None: none). Counted rather than compared by length, so a
+    # combining mark after a container cannot compose into it unseen.
     elements: dict[str | None, int]
     content_items: dict[str | None, int]
     # Hidden blocks in their issued shape, by the ``order`` of their marker.
@@ -670,11 +668,9 @@ class DocumentScan:
     ) -> bool:
         """True when the document has text, URLs or elements the region does not hold.
 
-        Any element counts, even one with no text or URL: an empty list item
-        numbers itself, a run of line breaks pushes the content off screen.
-        Of the hidden blocks, only the one holding marker ``own_block`` (its
-        ``order``) is not content: any other can carry text for a reader of
-        the markup, whatever ``mid`` it names.
+        Any element counts, even one with no text or URL. Of the hidden
+        blocks, only the one holding marker ``own_block`` (its ``order``) is
+        not content.
         """
         return any(
             count

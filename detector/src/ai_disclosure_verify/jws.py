@@ -125,8 +125,7 @@ def _check_depth(text: str) -> None:
     for match in _JSON_TOKEN.finditer(text):
         token = match.group()
         if token == '"':
-            # Not JSON: the parser rejects it, within the depth counted so
-            # far. Scanning on would retry every later quote.
+            # A string never closed: the parser rejects it, so stop rather than rescan.
             return
         if token[0] == '"':
             continue
@@ -238,12 +237,9 @@ def keys_from_jwks(jwks: object) -> dict[str, Ed25519PublicKey]:
     """Read the Ed25519 verification keys of a JWKS document, keyed by ``kid``.
 
     As RFC 7517 section 5 asks, an entry this profile cannot use is skipped
-    rather than failing the set (``_verification_key`` says which). An
-    Ed25519 entry without a ``kid`` takes its RFC 7638 thumbprint. The
-    ``kid`` is a name: it is not compared with the thumbprint. A ``kid``
-    that two usable entries share names no key, since either could be meant.
-    An Ed25519 entry skipped, and a shared ``kid``, are logged as warnings:
-    a marker signed with that key would otherwise read as an unknown key.
+    rather than failing the set, with a warning when it is an Ed25519 key. An
+    entry without a ``kid`` takes its RFC 7638 thumbprint, and a ``kid`` two
+    usable entries share names no key, with a warning.
 
     Raises:
         JwksError: The document is not a JSON object with a ``keys`` array.
@@ -264,7 +260,8 @@ def keys_from_jwks(jwks: object) -> dict[str, Ed25519PublicKey]:
         if key is None:
             if claims_ed25519:
                 logger.warning(
-                    "JWKS entry %d: Ed25519 key not usable, skipped", position
+                    "JWKS Ed25519 entry not usable, skipped",
+                    extra={"entry": position},
                 )
             continue
         kid = entry.get("kid") or jwk_thumbprint(key)
@@ -272,7 +269,7 @@ def keys_from_jwks(jwks: object) -> dict[str, Ed25519PublicKey]:
             shared.add(kid)
         keys[kid] = key
     for kid in sorted(shared):
-        logger.warning("JWKS kid %r names more than one key, skipped", kid)
+        logger.warning("JWKS kid names more than one key, skipped", extra={"kid": kid})
     return {kid: key for kid, key in keys.items() if kid not in shared}
 
 
