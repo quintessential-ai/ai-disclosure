@@ -50,32 +50,8 @@ MAX_XML_PART_BYTES = 4 * 1024 * 1024
 _PACKAGE_COMPRESSION = frozenset({zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED})
 _READ_CHUNK = 64 * 1024
 _EOF = b"%%EOF"
-# What the coverage check holds each Zip record field to (APPNOTE 4.3-4.5).
-# Every field is compared with the central record, which zipfile reads,
-# pinned to one value, or does not say where any byte is or how it is read.
-#
-# - Local header: signature pinned; flags, method, CRC-32 and sizes equal the
-#   central record's (CRC-32 and sizes may be 0 behind a data descriptor);
-#   name bytes equal the central name; extra field is the Zip64 field or
-#   nothing. Version needed and modification time locate nothing.
-# - Data descriptor: present exactly when flag bit 3 is set; signature
-#   optional; CRC-32 and sizes equal the central record's, 8-byte exactly when
-#   the entry has a Zip64 field; ends where the next record starts.
-# - Central record: signature pinned; flags and method read by zipfile, which
-#   refuses encryption and methods other than stored and deflated; no
-#   comment; extra field is the Zip64 field or nothing; disk 0; the local
-#   header offsets lay the entries end to end from byte 0 to the directory.
-#   Versions, time and attributes locate nothing.
-# - Zip64 field: ID pinned; holds exactly the values whose 32-bit field holds
-#   its mark, in APPNOTE order, and they are the values read.
-# - Zip64 end record and locator: signatures pinned; no extensible data; the
-#   record sits between the directory and the locator, which points at it;
-#   every disk number 0, one disk in all; both entry counts equal the
-#   directory's records. Versions locate nothing.
-# - End record: signature pinned; no comment and nothing after it; disks 0;
-#   both counts equal the directory's records; directory size and offset
-#   place the directory just before the end records, and equal the Zip64
-#   record's values unless they hold the mark deferring to them.
+# Every Zip record field is compared with the central record zipfile reads,
+# pinned to one value, or locates no byte; ``ooxml-parts/1`` states the rules.
 # Zip records (APPNOTE 4.3): the end of central directory record, 22 bytes
 # whose last two give the length of the comment after it; the Zip64 end record
 # and its 20-byte locator; and a data descriptor's optional signature.
@@ -95,6 +71,9 @@ _ZIP64_DISK_MARK = 0xFFFF
 # A part name holds no control character (ECMA-376 Part 2, 9.1.1), C1
 # included: a part name is an IRI, whose characters start at U+00A0. A line
 # feed in one would let two ``ooxml-parts/1`` listings read the same.
+# XML's whitespace (XML 1.0, production 3): routing text is stripped of
+# these and no other character.
+_XML_WHITESPACE = " \t\r\n"
 _CONTROL_CHARACTER = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
@@ -278,6 +257,28 @@ def _central_names(
     return names
 
 
+def _entry_disks(data: bytes, cd_start: int) -> list[int | None]:
+    """The disk each central record's entry starts on; None where it defers to a Zip64 field that does not hold it.
+
+    Read whatever else the record's extra field holds, so a disk other than
+    0 is found even behind an extra field the coverage check rejects.
+    """
+    disks: list[int | None] = []
+    position = cd_start
+    while data[position : position + 4] == b"PK\x01\x02":
+        lengths = [
+            int.from_bytes(data[position + at : position + at + 2], "little")
+            for at in (28, 30, 32)
+        ]
+        disk: int | None = int.from_bytes(data[position + 34 : position + 36], "little")
+        if disk == _ZIP64_DISK_MARK:
+            central = _central_names(data, position, 1)
+            disk = central[0][1] if central else None
+        disks.append(disk)
+        position += 46 + sum(lengths)
+    return disks
+
+
 def _local_entry_end(
     data: bytes, info: zipfile.ZipInfo, name: bytes, start: int, following: int
 ) -> int | None:
@@ -386,10 +387,9 @@ def _package_infos(data: bytes, zf: zipfile.ZipFile) -> dict[str, zipfile.ZipInf
         msg = f"Office package has more than {MAX_PACKAGE_PARTS} entries"
         raise ValueError(msg)
     _check_end_records(data, len(entries))
-    # zipfile reads no entry's disk; a record it cannot place is left to
-    # ``ooxml_uncovered``.
-    central = _central_names(data, zf.start_dir, len(entries))
-    if central is not None and any(disk != 0 for _name, disk in central):
+    # zipfile reads no entry's disk. A disk deferred to a Zip64 field that
+    # cannot be read is left to ``ooxml_uncovered``.
+    if any(disk not in (0, None) for disk in _entry_disks(data, zf.start_dir)):
         msg = "Office package entry starts on a disk other than 0"
         raise ValueError(msg)
     # ``orig_filename``: zipfile cuts ``filename`` at a NUL.
@@ -586,15 +586,20 @@ def _normalized_routing(data: bytes, tag: str, attribute: str, value: str) -> by
     for child in list(root):
         if child.tag == tag and child.get(attribute) == value:
             root.remove(child)
+    # C14N's own ``strip_text`` strips Unicode whitespace on some Pythons and
+    # XML whitespace on others, so the same file would digest two ways.
+    for element in root.iter():
+        if element.text is not None:
+            element.text = element.text.strip(_XML_WHITESPACE)
+        if element.tail is not None:
+            element.tail = element.tail.strip(_XML_WHITESPACE)
     try:
         written = ElementTree.tostring(root, encoding="unicode")
     except RecursionError as exc:
         # The serialiser recurses once per level of nesting.
         msg = "Office routing XML is nested too deeply"
         raise ValueError(msg) from exc
-    return ElementTree.canonicalize(
-        written, strip_text=True, rewrite_prefixes=True
-    ).encode("utf-8")
+    return ElementTree.canonicalize(written, rewrite_prefixes=True).encode("utf-8")
 
 
 def ooxml_digest(data: bytes) -> str:

@@ -276,6 +276,34 @@ def test_a_routing_part_over_its_cap_is_refused_before_reading(
         assert report.findings[0].content is ContentCheck.NOT_FOUND
 
 
+@pytest.mark.parametrize("part", ["_rels/.rels", "[Content_Types].xml"])
+@pytest.mark.parametrize(
+    ("padding", "same"),
+    [
+        pytest.param(" \t\r\n", True, id="xml-whitespace"),
+        pytest.param("\u00a0", False, id="nbsp"),
+        pytest.param("\u0085", False, id="next-line"),
+        pytest.param("\u2028", False, id="line-separator"),
+    ],
+)
+def test_routing_text_loses_only_xml_whitespace(
+    part: str, padding: str, same: bool, docx: bytes
+) -> None:
+    """On every Python, only space, tab, CR and LF at the ends of routing text go."""
+    with zipfile.ZipFile(io.BytesIO(docx)) as zf:
+        xml = zf.read(part).decode()
+    # The root's own text: a child's tail may go with the element the
+    # normalisation removes.
+    root_open = re.search(r"<[A-Za-z][^>]*>", xml)
+    assert root_open is not None
+    padded = xml[: root_open.end()] + padding + xml[root_open.end() :]
+    assert padded != xml
+
+    digest = files.ooxml_digest(_repack(docx, {part: padded.encode()}))
+
+    assert (digest == files.ooxml_digest(docx)) is same
+
+
 def test_deeply_nested_routing_reads_as_content_not_found(docx: bytes) -> None:
     depth = 5000
     content_types = (
@@ -1597,6 +1625,17 @@ def test_an_entry_on_another_disk_is_refused(
     assert _cli(tmp_path, "input.docx", package, jwks_file) == cli.EXIT_ERROR
 
 
+def test_an_entry_on_another_disk_is_refused_behind_an_extra_field_it_does_not_need(
+    docx: bytes, jwks_file: Path, tmp_path: Path
+) -> None:
+    """The disk is read even where the extra field leaves the record uncovered."""
+    package = _with_central_disk(docx, 1, 0)
+
+    with pytest.raises(MessageDecodeError, match="disk other than 0"):
+        detect_file(package, KEYS)
+    assert _cli(tmp_path, "input.docx", package, jwks_file) == cli.EXIT_ERROR
+
+
 def test_an_entry_disk_deferred_to_a_zip64_field_holding_0_verifies(
     docx: bytes,
 ) -> None:
@@ -2059,3 +2098,36 @@ def test_a_corrupt_deflate_stream_fails_closed(docx: bytes) -> None:
 
     assert report.findings[0].content is ContentCheck.NOT_FOUND
     assert report.verdict is Verdict.UNVERIFIED
+
+
+def test_a_changed_file_is_described_as_a_file(docx: bytes) -> None:
+    changed = _repack(docx, {"word/document.xml": b"<w:document>bye</w:document>"})
+
+    report = detect_file(changed, KEYS)
+
+    (finding,) = report.findings
+    assert finding.content is ContentCheck.MISMATCH
+    assert finding.content_meaning == "file content changed after signing"
+    assert "in transit" not in report.describe()
+    assert "in transit" not in json.dumps(report.to_dict())
+
+
+def test_a_claim_the_terminal_cannot_show_is_escaped(
+    docx: bytes, jwks_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with zipfile.ZipFile(io.BytesIO(docx)) as zf:
+        parts = {name: zf.read(name) for name in zf.namelist()}
+    claims = {
+        **decode_compact(_fixture_token(parts)).payload,
+        "on_behalf_of": "Ölçü Ågård Test",
+    }
+    data = _zip(_with_token(parts, golden_token(claims)))
+    stdout = io.TextIOWrapper(io.BytesIO(), encoding="ascii")
+    monkeypatch.setattr("sys.stdout", stdout)
+
+    code = _cli(tmp_path, "input.docx", data, jwks_file)
+
+    stdout.flush()
+    written = stdout.buffer.getvalue().decode("ascii")
+    assert code == cli.EXIT_VERIFIED
+    assert "\\xd6l\\xe7\\xfc \\xc5g\\xe5rd Test" in written

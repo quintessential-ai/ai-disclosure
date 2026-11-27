@@ -628,12 +628,14 @@ prove nothing.
    part from the package relationship, defaulting to `docProps/custom.xml`
    when no relationship exists. If present, its root must be the OOXML
    custom-properties `Properties` element.
-2. List every part except directory entries and the selected custom-properties
-   part. Normalize `_rels/.rels` by removing only custom-properties
-   relationships, and `[Content_Types].xml` by removing only the selected
-   part's `Override`. Serialize these two parts as C14N 2.0, stripping text
-   whitespace and rewriting namespace prefixes. All other routing remains
-   signed. Sort the list by part name, in Unicode code point order.
+2. List every part except directory entries and the selected
+   custom-properties part. Normalize `_rels/.rels` by removing only
+   custom-properties relationships, and `[Content_Types].xml` by removing
+   only the selected part's `Override`. Serialize these two parts as C14N
+   2.0, after removing leading and trailing XML whitespace (space, tab, CR,
+   LF) from every text and tail, and rewriting namespace prefixes. All other
+   routing remains signed. Sort the list by part name, in Unicode code point
+   order.
 3. For each part, write `NAME`, a line feed, the unpadded base64url SHA-256
    of the part's bytes, and a line feed.
 4. `content_sha256` is the unpadded base64url SHA-256 of that text, UTF-8
@@ -651,13 +653,13 @@ record's comment included, is content the marker does not cover.
 Each local header gives the same name, general-purpose flags, compression
 method, CRC-32 and sizes, and each data descriptor the same CRC-32 and
 sizes, as the entry's central directory record. A Zip64 extended-information
-field appears only where a 32-bit field holds 0xFFFFFFFF, with exactly the
-values those fields call for, and the Zip64 end record carries no extensible
-data. A package that breaks any of these has bytes its marker does not
-cover. The end record names disk 0 and counts every central directory
-record; a package that does not is refused. The Zip64
-end-of-central-directory locator names disk 0 of 1, every entry starts on
-disk 0, the end record's directory size and offset equal the Zip64 end
+field appears only where a field holds its maximum value (0xFFFF or
+0xFFFFFFFF), with exactly the values those fields call for, and the Zip64
+end record carries no extensible data. A package that breaks any of these
+has bytes its marker does not cover. The end record names disk 0 and counts
+every central directory record; a package that does not is refused. The
+Zip64 end-of-central-directory locator names disk 0 of 1, every entry starts
+on disk 0, the end record's directory size and offset equal the Zip64 end
 record's unless they hold 0xFFFFFFFF, and a data descriptor's sizes are 8
 bytes wide exactly when its entry has a Zip64 field; a package whose locator
 or entries name another disk is refused, and one that breaks the other two

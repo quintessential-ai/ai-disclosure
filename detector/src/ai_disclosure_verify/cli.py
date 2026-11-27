@@ -129,7 +129,12 @@ def _verify(
         output = json.dumps(report.to_dict(), indent=2, ensure_ascii=True)
     else:
         output = report.describe()
-    sys.stdout.write(output + "\n")
+    # A terminal that cannot show a claim's characters gets them escaped,
+    # not an encoding error.
+    encoding = sys.stdout.encoding or "utf-8"
+    sys.stdout.write(
+        (output + "\n").encode(encoding, "backslashreplace").decode(encoding)
+    )
     if report.verdict is Verdict.VERIFIED:
         return EXIT_VERIFIED
     if report.verdict is Verdict.VERIFIED_WITH_UNMARKED_CONTENT:
