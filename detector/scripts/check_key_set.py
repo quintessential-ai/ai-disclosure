@@ -9,6 +9,7 @@ otherwise. The rules are those of KEYS.md.
 
 from __future__ import annotations
 
+import os
 import sys
 from collections import Counter
 from pathlib import Path
@@ -91,13 +92,17 @@ def check_key_set(document: object) -> list[str]:
 
 def main(argv: list[str]) -> int:
     path = Path(argv[1]) if len(argv) > 1 else DEFAULT_PATH
+    # Checkers refuse a fetched set over this size, so it fails here unparsed.
+    # The size is checked before reading, and the read stops one byte past
+    # the cap, for a file whose size the system does not report.
     try:
-        data = path.read_bytes()
+        with path.open("rb") as file:
+            too_large = os.fstat(file.fileno()).st_size > MAX_JWKS_BYTES
+            data = b"" if too_large else file.read(MAX_JWKS_BYTES + 1)
     except OSError as exc:
         print(f"{path}: cannot read: {exc.strerror or exc}", file=sys.stderr)
         return 1
-    # Checkers refuse a fetched set over this size, so it fails here unparsed.
-    if len(data) > MAX_JWKS_BYTES:
+    if too_large or len(data) > MAX_JWKS_BYTES:
         print(f"{path}: larger than {MAX_JWKS_BYTES} bytes", file=sys.stderr)
         return 1
     try:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 import pytest
 from check_key_set import main
@@ -169,3 +169,46 @@ def test_a_set_over_the_size_cap_fails_unread(tmp_path: Path, capsys) -> None:
 
     assert code == 1
     assert f"larger than {MAX_JWKS_BYTES} bytes" in out.err
+
+
+def test_a_large_file_fails_before_it_is_read(
+    tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "jwks.json"
+    with path.open("wb") as file:
+        file.truncate(64 * MAX_JWKS_BYTES)
+
+    opened = Path.open
+
+    class Unread:
+        """The file, open for its size only."""
+
+        def __init__(self, target: Path) -> None:
+            self._file = opened(target, "rb")
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            self._file.close()
+
+        def fileno(self) -> int:
+            return self._file.fileno()
+
+        def read(self, *_: object) -> bytes:
+            raise AssertionError("read")
+
+    monkeypatch.setattr(Path, "open", lambda target, *_: Unread(target))
+    code = main(["check_key_set", str(path)])
+
+    assert code == 1
+    assert f"larger than {MAX_JWKS_BYTES} bytes" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(not Path("/dev/zero").exists(), reason="no /dev/zero")
+def test_an_endless_file_fails_after_the_cap(capsys) -> None:
+    """``/dev/zero`` reports no size, so only the bounded read stops it."""
+    code = main(["check_key_set", "/dev/zero"])
+
+    assert code == 1
+    assert f"larger than {MAX_JWKS_BYTES} bytes" in capsys.readouterr().err
