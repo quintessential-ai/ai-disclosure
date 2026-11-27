@@ -50,6 +50,8 @@ select = ["E", "F", "W", "I", "UP", "B"]
 
 [tool.ty.environment]
 python = ".venv"
+# pytest finds scripts/check_key_set.py through its pythonpath; so does ty.
+extra-paths = ["scripts"]
 
 [tool.ty.src]
 # Runs against the reference implementation, which is not a dependency here.
