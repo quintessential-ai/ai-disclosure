@@ -58,8 +58,13 @@ def golden_jwks() -> dict[str, Any]:
 
 def golden_token(claims: dict[str, Any]) -> str:
     """A compact JWS over ``claims``, signed with the vectors' test key."""
+    return golden_token_over(_compact(claims))
+
+
+def golden_token_over(payload: bytes) -> str:
+    """A compact JWS over the payload bytes as given, signed with the test key."""
     header = {"typ": "ai-disclosure+jwt", "kid": GOLDEN_KID, "alg": "EdDSA"}
-    signing_input = f"{_b64url(_compact(header))}.{_b64url(_compact(claims))}"
+    signing_input = f"{_b64url(_compact(header))}.{_b64url(payload)}"
     signature = Ed25519PrivateKey.from_private_bytes(_GOLDEN_SEED).sign(
         signing_input.encode("ascii")
     )

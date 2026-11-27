@@ -129,6 +129,8 @@ def test_only_the_canonical_last_signature_character_verifies() -> None:
         '{"a":NaN}',
         '{"a":Infinity}',
         '{"a":-Infinity}',
+        '{"a":1e999}',
+        '{"a":-1e999}',
         '{"a":' + "1" * 5000 + "}",
         "﻿{}",
     ],
@@ -138,6 +140,8 @@ def test_only_the_canonical_last_signature_character_verifies() -> None:
         "nan",
         "infinity",
         "minus_infinity",
+        "float_overflow",
+        "minus_float_overflow",
         "integer_too_long",
         "byte_order_mark",
     ],
@@ -196,13 +200,52 @@ def test_parse_json_reads_utf8_bytes_only() -> None:
         (b'{"alg":"EdDSA","alg":"none","typ":"ai-disclosure+jwt"}', b'{"a":1}'),
         (b'{"alg":"EdDSA","typ":"ai-disclosure+jwt"}', b'{"mid":"a","mid":"b"}'),
         (b'{"alg":"EdDSA","typ":"ai-disclosure+jwt"}', b'{"iat":NaN}'),
+        (b'{"alg":"EdDSA","typ":"ai-disclosure+jwt"}', b'{"iat":1e999}'),
         (b'{"alg":"EdDSA","typ":"ai-disclosure+jwt"}', '{"a":1}'.encode("utf-16")),
     ],
-    ids=["duplicate_header", "duplicate_claim", "nan_claim", "utf16_payload"],
+    ids=[
+        "duplicate_header",
+        "duplicate_claim",
+        "nan_claim",
+        "overflowing_claim",
+        "utf16_payload",
+    ],
 )
 def test_decode_compact_refuses_ambiguous_json(header: bytes, payload: bytes) -> None:
     with pytest.raises(MalformedTokenError):
         decode_compact(_signed(header, payload))
+
+
+def test_parse_json_reads_finite_floats() -> None:
+    assert parse_json('{"a":1.5e308,"b":-2.5}') == {"a": 1.5e308, "b": -2.5}
+
+
+def _token_of_length(length: int) -> str:
+    """A signed token exactly ``length`` characters long."""
+    # Base64url skips one length in four; a space in the header shifts it.
+    for pad in range(3):
+        header = json.dumps({**_HEADER, "alg": "EdDSA"}).encode() + b" " * pad
+        for size in range(length * 3 // 4 - 300, length):
+            token = _signed(header, b'{"a":"' + b"x" * size + b'"}')
+            if len(token) == length:
+                return token
+            if len(token) > length:
+                break
+    msg = f"no token is {length} characters"
+    raise AssertionError(msg)
+
+
+def test_a_token_at_the_length_cap_decodes() -> None:
+    token = _token_of_length(jws.MAX_TOKEN_CHARS)
+
+    assert check_signature(decode_compact(token), _KEYS) is SignatureStatus.VALID
+    # Whitespace around a token is not part of it.
+    assert decode_compact(f"  {token}\n").payload == decode_compact(token).payload
+
+
+def test_a_token_over_the_length_cap_is_malformed() -> None:
+    with pytest.raises(MalformedTokenError, match="at most 8192 characters"):
+        decode_compact(_token_of_length(jws.MAX_TOKEN_CHARS + 1))
 
 
 # ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@ import binascii
 import hashlib
 import json
 import logging
+import math
 import re
 from dataclasses import dataclass
 from enum import StrEnum
@@ -41,6 +42,10 @@ HEADER_MEMBERS = frozenset({"alg", "typ", "kid"})
 # token or key set needs three levels; Python's own recursion limit differs
 # between versions, so it cannot be the bound.
 MAX_JSON_DEPTH = 32
+# A longer token is malformed. An issued one is under 1 KiB unless its
+# ``on_behalf_of`` is exceptionally long, and the issuer does not sign one
+# over this.
+MAX_TOKEN_CHARS = 8192
 # A whole string, a bracket, or a quote that opens a string never closed.
 _JSON_TOKEN = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"|[\[\]{}]|"', re.DOTALL)
 
@@ -104,15 +109,19 @@ def b64url_decode(text: str) -> bytes:
 def parse_json(data: str | bytes) -> object:
     """Parse JSON text, refusing what RFC 8259 leaves to the parser.
 
-    Bytes must be UTF-8. Duplicate member names, ``NaN``, ``Infinity`` and a
-    byte-order mark are refused, as are an integer too long for Python to
-    convert and arrays or objects nested more than ``MAX_JSON_DEPTH`` deep.
+    Bytes must be UTF-8. Duplicate member names, ``NaN``, ``Infinity``, a
+    number too large for a float (``1e999``) and a byte-order mark are
+    refused, as are an integer too long for Python to convert and arrays or
+    objects nested more than ``MAX_JSON_DEPTH`` deep.
     Raises ``ValueError``.
     """
     text = data.decode("utf-8") if isinstance(data, bytes) else data
     _check_depth(text)
     return json.loads(
-        text, object_pairs_hook=_unique_members, parse_constant=_refuse_constant
+        text,
+        object_pairs_hook=_unique_members,
+        parse_constant=_refuse_constant,
+        parse_float=_finite_float,
     )
 
 
@@ -145,6 +154,14 @@ def _refuse_constant(name: str) -> NoReturn:
     raise ValueError(msg)
 
 
+def _finite_float(text: str) -> float:
+    value = float(text)
+    if not math.isfinite(value):
+        msg = f"{text} is out of range for a float"
+        raise ValueError(msg)
+    return value
+
+
 def _compact_json(value: Mapping[str, Any]) -> bytes:
     return json.dumps(
         value, separators=(",", ":"), sort_keys=True, ensure_ascii=False
@@ -152,8 +169,15 @@ def _compact_json(value: Mapping[str, Any]) -> bytes:
 
 
 def decode_compact(token: str) -> DecodedToken:
-    """Split and JSON-decode a compact JWS without checking the signature."""
-    parts = token.strip().split(".")
+    """Split and JSON-decode a compact JWS without checking the signature.
+
+    A token longer than ``MAX_TOKEN_CHARS`` is malformed.
+    """
+    token = token.strip()
+    if len(token) > MAX_TOKEN_CHARS:
+        msg = f"a token is at most {MAX_TOKEN_CHARS} characters"
+        raise MalformedTokenError(msg)
+    parts = token.split(".")
     if len(parts) != 3:
         msg = "a compact JWS has exactly three dot-separated parts"
         raise MalformedTokenError(msg)

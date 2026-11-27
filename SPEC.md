@@ -132,7 +132,7 @@ header and the payload are UTF-8 JSON objects
 ([RFC 8259](https://www.rfc-editor.org/rfc/rfc8259)) with no member name
 repeated in any object, no `NaN` or `Infinity`, and no array or object
 nested more than 32 deep. A token that is not is malformed, and is never
-verified.
+verified. A token longer than 8192 characters is malformed.
 
 ### Protected header
 
@@ -181,7 +181,8 @@ When a deployment has no signing key, the marker is still issued, with
 `alg: none`, no `kid` and an empty signature part (`HEADER.PAYLOAD.`). It
 states the same facts but proves nothing about its origin. A verifier reports
 it as unsigned and never as verified. A token with `alg: none` and a
-non-empty signature is invalid.
+non-empty signature is invalid. The reference issuer also leaves a marker
+unsigned when its token, signed, would be longer than 8192 characters.
 
 ## Markup allowlist
 
@@ -594,7 +595,9 @@ and normalized routing. PDF markers cover only the revision preceding the
 marker-bearing update, not the displayed file as a whole. Writing the
 marker changes the file's metadata, so each file canonicalisation digests
 only what writing the marker leaves alone. The token is never visible in the
-document.
+document. Anyone who can change a file can remove its marker, so
+`no_marker` does not show that a file was not AI-generated; a marker that is
+found and verifies vouches only for what it signs.
 
 | File | Carrier | `canon` |
 | --- | --- | --- |
@@ -616,9 +619,11 @@ prove nothing.
    declaring more than 4 MiB; only those three are read whole, every other
    part is hashed as it is read.
    Reject duplicate part names, XML entity declarations, and ambiguous or
-   external custom-properties relationships. Select the custom-properties part
-   from the package relationship, defaulting to `docProps/custom.xml` when no
-   relationship exists. If present, its root must be the OOXML
+   external custom-properties relationships. A part name holds no control
+   character (ECMA-376 Part 2, 9.1.1); a package with one is refused, so the
+   list of names and hashes reads one way only. Select the custom-properties
+   part from the package relationship, defaulting to `docProps/custom.xml`
+   when no relationship exists. If present, its root must be the OOXML
    custom-properties `Properties` element.
 2. List every part except directory entries and the selected custom-properties
    part. Normalize `_rels/.rels` by removing only custom-properties
@@ -672,9 +677,9 @@ detector does not look for it.
 
 ### Verifying a file
 
-Steps 2 and 3 of [Verifying a message](#verifying-a-message) apply
+Steps 2 to 4 of [Verifying a message](#verifying-a-message) apply
 unchanged: an `AIDisclosure` property or PDF entry that is empty, or holds
-anything but a token, is a malformed token, never `no_marker`. For step 4,
+anything but a token, is a malformed token, never `no_marker`. For step 5,
 recompute the digest for the token's `canon`; a token whose `canon` does not
 belong to the file type is unsupported. The verdict is
 `verified` when the signature is valid and the digest matches, and
@@ -878,7 +883,8 @@ A file is recognised only from its first byte. A PDF or Office file with
 anything in front of it is read by what it starts with, and its marker is
 not found: remove what is in front and check the file itself. So a message,
 an HTML file, a PDF or an Office file carrying a marker never reads
-`no_marker` as issued; once something is added in front of a file, it may.
+`no_marker` as issued; once something is added in front of or after a file,
+it may.
 
 A message whose
 MIME parts nest too deeply for the parser is reported as unreadable (exit status

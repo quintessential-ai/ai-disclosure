@@ -19,6 +19,7 @@ from helpers import (
     golden_jwks,
     golden_public_key,
     golden_token,
+    golden_token_over,
     signed_vector_body,
 )
 
@@ -753,6 +754,171 @@ def test_a_directory_that_stops_short_of_the_end_record_is_not_covered(
 
     assert files._zip_layout(data) is None
     assert files.ooxml_uncovered(data) is True
+
+
+def test_a_fake_end_record_appended_hides_the_marker(
+    docx: bytes, jwks_file: Path, tmp_path: Path
+) -> None:
+    """Changing a file can remove its marker; it never makes the file read verified."""
+    data = docx + b"note PK\x05\x06" + b"\x00" * 18
+
+    assert detect_file(data, KEYS).verdict is Verdict.NONE
+    assert _cli(tmp_path, "input.docx", data, jwks_file) == cli.EXIT_NO_MARKER
+
+
+def test_a_partial_end_record_appended_is_unreadable(
+    docx: bytes, jwks_file: Path, tmp_path: Path
+) -> None:
+    data = docx + b"xyz PK\x05\x06 abc"
+
+    with pytest.raises(MessageDecodeError):
+        detect_file(data, KEYS)
+    assert _cli(tmp_path, "input.docx", data, jwks_file) == cli.EXIT_ERROR
+
+
+def _zip(parts: dict[str, bytes]) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, data in parts.items():
+            zf.writestr(name, data)
+    return buffer.getvalue()
+
+
+def _fixture_token(parts: dict[str, bytes]) -> str:
+    found = re.search(rb"<vt:lpwstr>([^<]+)</vt:lpwstr>", parts["docProps/custom.xml"])
+    assert found is not None
+    return found.group(1).decode()
+
+
+def _with_token(parts: dict[str, bytes], token: str) -> dict[str, bytes]:
+    custom = parts["docProps/custom.xml"]
+    old = _fixture_token(parts).encode()
+    return parts | {"docProps/custom.xml": custom.replace(old, token.encode())}
+
+
+def _signed_parts(docx: bytes, extra: dict[str, bytes]) -> dict[str, bytes]:
+    """The parts of the signed fixture plus ``extra``, signed again."""
+    with zipfile.ZipFile(io.BytesIO(docx)) as zf:
+        parts = {name: zf.read(name) for name in zf.namelist()} | extra
+    # The digest leaves out the custom-properties part, so it can be filled after.
+    claims = {
+        **decode_compact(_fixture_token(parts)).payload,
+        "content_sha256": files.ooxml_digest(_zip(parts)),
+    }
+    return _with_token(parts, golden_token(claims))
+
+
+def test_a_line_feed_in_a_part_name_cannot_stand_in_for_a_removed_part(
+    docx: bytes, jwks_file: Path, tmp_path: Path
+) -> None:
+    disclaimer, logo = b"\x89PNG disclaimer image", b"\x89PNG logo"
+    parts = _signed_parts(
+        docx, {"word/media/a.png": disclaimer, "word/media/b.png": logo}
+    )
+    assert detect_file(_zip(parts), KEYS).verdict is Verdict.VERIFIED
+    # One part whose name spells a.png's line of the listing, then b.png's name.
+    del parts["word/media/a.png"], parts["word/media/b.png"]
+    a_hash = b64url_encode(hashlib.sha256(disclaimer).digest())
+    parts[f"word/media/a.png\n{a_hash}\nword/media/b.png"] = logo
+    forged = _zip(parts)
+
+    with pytest.raises(MessageDecodeError, match="control character"):
+        detect_file(forged, KEYS)
+    assert _cli(tmp_path, "input.docx", forged, jwks_file) == cli.EXIT_ERROR
+
+
+def _renamed(package: bytes, old: str, new: bytes) -> bytes:
+    """``package`` with the entry name ``old`` rewritten, byte for byte, as ``new``."""
+    assert len(new) == len(old.encode())
+    # Once in the local entry, once in the central directory.
+    assert package.count(old.encode()) == 2
+    return package.replace(old.encode(), new)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        b"word/a\nb.png",
+        b"word/a\rb.png",
+        b"word/a\x00b.png",
+        b"word/a\x7fb.png",
+        b"word/a\x1fb.png",
+        b"word/\n/",
+    ],
+    ids=[
+        "line-feed",
+        "carriage-return",
+        "nul",
+        "delete",
+        "unit-separator",
+        "directory-entry",
+    ],
+)
+def test_an_entry_name_with_a_control_character_is_refused(
+    name: bytes, docx: bytes, jwks_file: Path, tmp_path: Path
+) -> None:
+    placeholder = "word/" + "_" * (len(name) - len("word/"))
+    if name.endswith(b"/"):
+        placeholder = placeholder[:-1] + "/"
+    content = b"" if name.endswith(b"/") else b"x"
+    package = _renamed(
+        _zip(_signed_parts(docx, {placeholder: content})), placeholder, name
+    )
+
+    with pytest.raises(MessageDecodeError, match="control character"):
+        detect_file(package, KEYS)
+    assert _cli(tmp_path, "input.docx", package, jwks_file) == cli.EXIT_ERROR
+
+
+def test_a_part_name_with_a_c1_control_character_is_refused(
+    docx: bytes, jwks_file: Path, tmp_path: Path
+) -> None:
+    # ``é`` makes the writer flag the name as UTF-8; NEL (U+0085) takes its
+    # two bytes, so the flag stays and the name reads as U+0085.
+    placeholder = "word/aéb.png"
+    package = _renamed(
+        _zip(_signed_parts(docx, {placeholder: b"x"})),
+        placeholder,
+        "word/a\u0085b.png".encode(),
+    )
+
+    with pytest.raises(MessageDecodeError, match="control character"):
+        detect_file(package, KEYS)
+    assert _cli(tmp_path, "input.docx", package, jwks_file) == cli.EXIT_ERROR
+
+
+def test_a_part_name_with_spaces_and_other_printable_characters_verifies(
+    docx: bytes,
+) -> None:
+    parts = _signed_parts(docx, {"word/media/a b~é.png": b"x"})
+
+    assert detect_file(_zip(parts), KEYS).verdict is Verdict.VERIFIED
+
+
+def test_a_claim_too_large_for_a_float_is_malformed_in_the_json_report(
+    docx: bytes,
+    jwks_file: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with zipfile.ZipFile(io.BytesIO(docx)) as zf:
+        parts = {name: zf.read(name) for name in zf.namelist()}
+    claims = decode_compact(_fixture_token(parts)).payload
+    payload = json.dumps({**claims, "iat": 0}).replace('"iat": 0', '"iat": 1e999')
+    data = _zip(_with_token(parts, golden_token_over(payload.encode())))
+
+    path = tmp_path / "input.docx"
+    path.write_bytes(data)
+    assert cli.main([str(path), "--jwks", str(jwks_file), "--json"]) == (
+        cli.EXIT_UNVERIFIED
+    )
+
+    def refuse(name: str) -> None:
+        raise AssertionError(name)
+
+    report = json.loads(capsys.readouterr().out, parse_constant=refuse)
+    assert report["findings"][0]["error"].startswith("malformed token")
+    assert report["findings"][0]["claims"] == {}
 
 
 def test_a_package_comment_is_not_covered(
