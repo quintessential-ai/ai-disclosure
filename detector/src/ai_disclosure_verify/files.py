@@ -50,6 +50,32 @@ MAX_XML_PART_BYTES = 4 * 1024 * 1024
 _PACKAGE_COMPRESSION = frozenset({zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED})
 _READ_CHUNK = 64 * 1024
 _EOF = b"%%EOF"
+# What the coverage check holds each Zip record field to (APPNOTE 4.3-4.5).
+# Every field is compared with the central record, which zipfile reads,
+# pinned to one value, or does not say where any byte is or how it is read.
+#
+# - Local header: signature pinned; flags, method, CRC-32 and sizes equal the
+#   central record's (CRC-32 and sizes may be 0 behind a data descriptor);
+#   name bytes equal the central name; extra field is the Zip64 field or
+#   nothing. Version needed and modification time locate nothing.
+# - Data descriptor: present exactly when flag bit 3 is set; signature
+#   optional; CRC-32 and sizes equal the central record's, 8-byte exactly when
+#   the entry has a Zip64 field; ends where the next record starts.
+# - Central record: signature pinned; flags and method read by zipfile, which
+#   refuses encryption and methods other than stored and deflated; no
+#   comment; extra field is the Zip64 field or nothing; disk 0; the local
+#   header offsets lay the entries end to end from byte 0 to the directory.
+#   Versions, time and attributes locate nothing.
+# - Zip64 field: ID pinned; holds exactly the values whose 32-bit field holds
+#   its mark, in APPNOTE order, and they are the values read.
+# - Zip64 end record and locator: signatures pinned; no extensible data; the
+#   record sits between the directory and the locator, which points at it;
+#   every disk number 0, one disk in all; both entry counts equal the
+#   directory's records. Versions locate nothing.
+# - End record: signature pinned; no comment and nothing after it; disks 0;
+#   both counts equal the directory's records; directory size and offset
+#   place the directory just before the end records, and equal the Zip64
+#   record's values unless they hold the mark deferring to them.
 # Zip records (APPNOTE 4.3): the end of central directory record, 22 bytes
 # whose last two give the length of the comment after it; the Zip64 end record
 # and its 20-byte locator; and a data descriptor's optional signature.
@@ -132,10 +158,11 @@ def ooxml_uncovered(data: bytes, *, streams_complete: bool | None = None) -> boo
     if layout is None:
         return True
     cd_start = layout
-    names = _central_names(data, cd_start, len(infos))
+    central = _central_names(data, cd_start, len(infos))
     # The digest leaves out directory entries, so their names are unsigned.
-    if names is None or any(info.comment or info.is_dir() for info in infos):
+    if central is None or any(info.comment or info.is_dir() for info in infos):
         return True
+    names = [name for name, _disk in central]
     entries = sorted(zip(infos, names, strict=True), key=lambda e: e[0].header_offset)
     position = 0
     for index, (info, name) in enumerate(entries):
@@ -161,15 +188,20 @@ def _streams_complete(data: bytes) -> bool:
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
             return all(
                 _entry_data(data, zf, info, lambda _chunk: None)
-                for info in _package_infos(zf).values()
+                for info in _package_infos(data, zf).values()
             )
     except (zipfile.BadZipFile, ValueError, NotImplementedError, OSError):
         return False
 
 
+def _end_record(data: bytes) -> int:
+    """Where the end of central directory record zipfile opens the package by starts, or -1."""
+    return data.rfind(_EOCD, max(0, len(data) - _EOCD_SIZE - 0xFFFF))
+
+
 def _zip_layout(data: bytes) -> int | None:
     """Where the central directory starts, or None when it and the end records do not fit."""
-    end = data.rfind(_EOCD, max(0, len(data) - _EOCD_SIZE - 0xFFFF))
+    end = _end_record(data)
     if (
         end < 0
         or len(data) != end + _EOCD_SIZE
@@ -191,9 +223,16 @@ def _zip_layout(data: bytes) -> int | None:
         record_size = int.from_bytes(data[record + 4 : record + 12], "little")
         if record_size != _ZIP64_END_SIZE or record + 12 + record_size != locator:
             return None
-        cd_size = int.from_bytes(data[record + 40 : record + 48], "little")
-        cd_start = int.from_bytes(data[record + 48 : record + 56], "little")
-        cd_end = record
+        zip64_size = int.from_bytes(data[record + 40 : record + 48], "little")
+        zip64_start = int.from_bytes(data[record + 48 : record + 56], "little")
+        # The end record's own value stands unless it holds the mark that
+        # defers to the Zip64 one.
+        if cd_size not in (_ZIP64_MARK, zip64_size) or cd_start not in (
+            _ZIP64_MARK,
+            zip64_start,
+        ):
+            return None
+        cd_size, cd_start, cd_end = zip64_size, zip64_start, record
     # zipfile's own offset reckoning already shifts every entry when this
     # fails; the check states the rule for readers that do not.
     if cd_start + cd_size != cd_end:
@@ -201,13 +240,16 @@ def _zip_layout(data: bytes) -> int | None:
     return cd_start
 
 
-def _central_names(data: bytes, cd_start: int, count: int) -> list[bytes] | None:
-    """Each central record's name bytes, in directory order.
+def _central_names(
+    data: bytes, cd_start: int, count: int
+) -> list[tuple[bytes, int]] | None:
+    """Each central record's name bytes and the disk its entry starts on, in directory order.
 
+    The disk is the Zip64 field's value when the record defers it there.
     None when a record's extra field is anything but the Zip64 values its
     size, offset and disk fields call for.
     """
-    names: list[bytes] = []
+    names: list[tuple[bytes, int]] = []
     position = cd_start
     for _ in range(count):
         if data[position : position + 4] != b"PK\x01\x02":
@@ -226,12 +268,12 @@ def _central_names(data: bytes, cd_start: int, count: int) -> list[bytes] | None
         ]
         if disk == _ZIP64_DISK_MARK:
             widths.append(4)
-        if (
-            _zip64_values(data[extra_start : extra_start + extra_length], widths)
-            is None
-        ):
+        values = _zip64_values(data[extra_start : extra_start + extra_length], widths)
+        if values is None:
             return None
-        names.append(data[position + 46 : extra_start])
+        if disk == _ZIP64_DISK_MARK:
+            disk = values[-1]
+        names.append((data[position + 46 : extra_start], disk))
         position = extra_start + extra_length + comment_length
     return names
 
@@ -255,16 +297,18 @@ def _local_entry_end(
     end = extra_start + extra_length + info.compress_size
     if not info.flag_bits & 0x8:
         return end
-    # A data descriptor: CRC and sizes, 4- or 8-byte, with or without its
-    # signature. The one that reaches the next record, holding what the
-    # directory declares, is the one written.
+    # A data descriptor: CRC and sizes, with or without its signature. The
+    # sizes are 8-byte when the entry has a Zip64 field, the only extra field
+    # it may have, and 4-byte otherwise (APPNOTE 4.3.9.2). The one that
+    # reaches the next record, holding what the directory declares, is the
+    # one written.
     declared = (info.CRC, info.compress_size, info.file_size)
-    for size in (12, 16, 20, 24):
-        has_signature = size in (16, 24)
+    width = 8 if extra_length else 4
+    for has_signature in (False, True):
         if has_signature and data[end : end + 4] != _DATA_DESCRIPTOR:
             continue
         fields = end + 4 if has_signature else end
-        width = 8 if size in (20, 24) else 4
+        size = fields - end + 4 + 2 * width
         held = (
             int.from_bytes(data[fields : fields + 4], "little"),
             int.from_bytes(data[fields + 4 : fields + 4 + width], "little"),
@@ -278,12 +322,17 @@ def _local_entry_end(
 def _local_fields_agree(
     data: bytes, start: int, extra: bytes, info: zipfile.ZipInfo
 ) -> bool:
-    """Whether the local header's CRC-32, sizes and extra field are what the central directory declares.
+    """Whether the local header's flags, method, CRC-32, sizes and extra field are what the central directory declares.
 
     zipfile reads only the directory's, so a local value that differs is an
     unread byte. Behind a data descriptor (flag bit 3) each may also be zero,
-    as writers leave them.
+    as writers leave them. The flags and compression method say how the
+    entry's bytes are read, so they must be the directory's too.
     """
+    flags = int.from_bytes(data[start + 6 : start + 8], "little")
+    method = int.from_bytes(data[start + 8 : start + 10], "little")
+    if (flags, method) != (info.flag_bits, info.compress_type):
+        return False
     crc = int.from_bytes(data[start + 14 : start + 18], "little")
     compressed = int.from_bytes(data[start + 18 : start + 22], "little")
     uncompressed = int.from_bytes(data[start + 22 : start + 26], "little")
@@ -329,12 +378,19 @@ def is_pdf(data: bytes) -> bool:
     return data.startswith(b"%PDF-")
 
 
-def _package_infos(zf: zipfile.ZipFile) -> dict[str, zipfile.ZipInfo]:
+def _package_infos(data: bytes, zf: zipfile.ZipFile) -> dict[str, zipfile.ZipInfo]:
     """The package's parts by name, refused on what they declare before any is read."""
     entries = zf.infolist()
     # Directory entries count too: each costs as much to hold as a part.
     if len(entries) > MAX_PACKAGE_PARTS:
         msg = f"Office package has more than {MAX_PACKAGE_PARTS} entries"
+        raise ValueError(msg)
+    _check_end_records(data, len(entries))
+    # zipfile reads no entry's disk; a record it cannot place is left to
+    # ``ooxml_uncovered``.
+    central = _central_names(data, zf.start_dir, len(entries))
+    if central is not None and any(disk != 0 for _name, disk in central):
+        msg = "Office package entry starts on a disk other than 0"
         raise ValueError(msg)
     # ``orig_filename``: zipfile cuts ``filename`` at a NUL.
     if any(_CONTROL_CHARACTER.search(info.orig_filename) for info in entries):
@@ -359,6 +415,47 @@ def _package_infos(zf: zipfile.ZipFile) -> dict[str, zipfile.ZipInfo]:
             msg = f"cannot read Office package parts: {info.filename} is encrypted"
             raise ValueError(msg)
     return by_name
+
+
+def _check_end_records(data: bytes, count: int) -> None:
+    """Refuse a package whose end records name a disk other than 0 or count other than its ``count`` central records.
+
+    zipfile reads the directory by its size and reads none of these fields.
+    The records are the ones it opens the package by; ``count`` is within
+    ``MAX_PACKAGE_PARTS``, so no field needs its Zip64 mark.
+    """
+    end = _end_record(data)
+
+    def field(at: int, width: int) -> int:
+        return int.from_bytes(data[at : at + width], "little")
+
+    # Each record's disk, the directory's disk, and its two entry counts.
+    held = [
+        (field(end + 4, 2), field(end + 6, 2), field(end + 8, 2), field(end + 10, 2))
+    ]
+    # The locator names the disk holding the Zip64 end record, and how many disks there are.
+    locator_disks = (0, 1)
+    locator = end - _ZIP64_LOCATOR_SIZE
+    if locator >= 0 and data[locator : locator + 4] == _ZIP64_LOCATOR:
+        locator_disks = (field(locator + 4, 4), field(locator + 16, 4))
+        record = field(locator + 8, 8)
+        if data[record : record + 4] == _ZIP64_END:
+            held.append(
+                (
+                    field(record + 16, 4),
+                    field(record + 20, 4),
+                    field(record + 24, 8),
+                    field(record + 32, 8),
+                )
+            )
+    if locator_disks != (0, 1) or any(
+        fields != (0, 0, count, count) for fields in held
+    ):
+        msg = (
+            "Office package end record names another disk or does not count "
+            "its central directory records"
+        )
+        raise ValueError(msg)
 
 
 def _entry_data(
@@ -518,7 +615,7 @@ def ooxml_digest_and_streams(data: bytes) -> tuple[str, bool]:
     second, so a checker inflates each part once.
     """
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
-        infos = _package_infos(zf)
+        infos = _package_infos(data, zf)
         complete = True
         rels = None
         if _ROOT_RELS in infos:
@@ -577,7 +674,7 @@ def ooxml_token(data: bytes) -> str | None:
     property without a value gives ``""``: it is still an attempt at a marker.
     """
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
-        infos = _package_infos(zf)
+        infos = _package_infos(data, zf)
         rels = (
             _read_part(data, zf, infos[_ROOT_RELS])[0] if _ROOT_RELS in infos else None
         )
