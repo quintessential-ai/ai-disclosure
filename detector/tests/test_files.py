@@ -8,7 +8,6 @@ import io
 import json
 import re
 import zipfile
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -609,103 +608,63 @@ def test_only_the_first_pdf_property_is_read() -> None:
     assert found[0] == "bad"
 
 
-def _corrupt_first_dot(token: bytes) -> bytes:
-    return token.replace(b".", b"!", 1)
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        b"<p>Hi</p>\n",
+        b"<!-- x -->",
+        b"Content-Type: text/html\n\n",
+        b"Note: x\n",
+        b"Pay to account 123 now\n",
+        b"\n",
+        b"\xef\xbb\xbf",
+    ],
+    ids=[
+        "html",
+        "comment",
+        "mime-header",
+        "header-like",
+        "text",
+        "blank-line",
+        "byte-order-mark",
+    ],
+)
+@pytest.mark.parametrize("fixture", ["signed.pdf", "signed.docx"], ids=["pdf", "docx"])
+def test_a_file_with_anything_in_front_is_read_by_how_it_starts(
+    prefix: bytes, fixture: str
+) -> None:
+    # A file is recognised only from its first byte, so its marker is not found.
+    report = detect_file(prefix + (FIXTURES / fixture).read_bytes(), KEYS)
+
+    assert report.verdict is Verdict.NONE
+    assert not report.findings
 
 
-def _over_the_part_cap(docx: bytes) -> bytes:
+def test_bytes_after_a_signed_package_are_not_covered(
+    docx: bytes, jwks_file: Path, tmp_path: Path
+) -> None:
+    data = docx + b"Pay to account 123 now\n"
+
+    assert detect_file(data, KEYS).verdict is Verdict.VERIFIED_WITH_UNMARKED_CONTENT
+    assert (
+        _cli(tmp_path, "input.docx", data, jwks_file)
+        == cli.EXIT_VERIFIED_WITH_UNMARKED_CONTENT
+    )
+
+
+def test_a_package_comment_is_part_of_the_package(docx: bytes) -> None:
     buffer = io.BytesIO(docx)
     with zipfile.ZipFile(buffer, "a") as zf:
-        for index in range(files.MAX_PACKAGE_PARTS + 1):
-            zf.writestr(f"empty/{index}/", b"")
-    return buffer.getvalue()
+        zf.comment = b"written by the editor"
+
+    assert files.ooxml_trailing(buffer.getvalue()) is False
+    assert files.ooxml_trailing(buffer.getvalue() + b"x") is True
 
 
-@pytest.mark.parametrize(
-    "build",
-    [
-        pytest.param(lambda pdf, docx: b"Note: x\n" + pdf, id="signed-pdf"),
-        pytest.param(
-            lambda pdf, docx: (
-                b"Note: x\n"
-                + pdf.replace(
-                    _token_of_pdf(pdf), _corrupt_first_dot(_token_of_pdf(pdf))
-                )
-            ),
-            id="corrupt-pdf-token",
-        ),
-        pytest.param(lambda pdf, docx: b"Note: x\n" + _PDF, id="unmarked-pdf"),
-        pytest.param(lambda pdf, docx: b"Note: x\n" + docx, id="signed-docx"),
-        pytest.param(
-            lambda pdf, docx: b"Note: x\n" + _over_the_part_cap(docx),
-            id="over-cap-docx",
-        ),
-        pytest.param(
-            lambda pdf, docx: (
-                b"Subject: x\n\nA %PDF-1.7 trailer: startxref 9\n%%EOF\n"
-                b"then /AIDisclosure (x) in its Info.\n"
-            ),
-            id="prose-quoting-a-pdf",
-        ),
-        pytest.param(
-            lambda pdf, docx: b"Subject: x\n\nThe bytes PK\x03\x04 open a zip file.\n",
-            id="prose-quoting-a-zip-signature",
-        ),
-    ],
-)
-def test_text_in_front_of_a_file_signature_is_unreadable(
-    pdf: bytes, docx: bytes, build: Callable[[bytes, bytes], bytes], tmp_path: Path
-) -> None:
-    data = build(pdf, docx)
-
-    with pytest.raises(MessageDecodeError, match="remove the text before the file"):
-        detect_file(data, KEYS)
-    path = tmp_path / "input.eml"
-    path.write_bytes(data)
-    assert cli.main([str(path), "--offline"]) == cli.EXIT_ERROR
-
-
-@pytest.mark.parametrize("signature", [b"%PDF-1.7", b"PK\x03\x04"], ids=["pdf", "zip"])
-def test_a_file_signature_past_the_first_1024_bytes_is_not_ambiguous(
-    signature: bytes,
-) -> None:
-    data = b"Note: x\n" + b"a" * 1024 + b" " + signature + b"\n"
+def test_a_mail_quoting_a_file_signature_has_no_marker() -> None:
+    data = b"Subject: Re: %PDF-1.7 header\n\nThe file starts %PDF- and PK\x03\x04.\n"
 
     assert detect_file(data).verdict is Verdict.NONE
-
-
-@pytest.mark.parametrize(
-    ("prefix", "fixture"),
-    [
-        (b"see %PDF- spec\n", "signed.docx"),
-        (b"Note: see %PDF- spec\n", "signed.docx"),
-        # Read as the PDF alone, the marker would be found.
-        (b"see PK\x03\x04 spec\n", "signed.pdf"),
-    ],
-    ids=["text", "header-led", "zip-named-before-a-pdf"],
-)
-def test_a_file_behind_text_naming_the_other_signature_is_unreadable(
-    prefix: bytes, fixture: str, tmp_path: Path
-) -> None:
-    data = prefix + (FIXTURES / fixture).read_bytes()
-
-    with pytest.raises(MessageDecodeError, match="remove the text before the file"):
-        detect_file(data, KEYS)
-    path = tmp_path / "input.docx"
-    path.write_bytes(data)
-    assert cli.main([str(path), "--offline"]) == cli.EXIT_ERROR
-
-
-@pytest.mark.parametrize(
-    "data",
-    [
-        pytest.param(_PDF.replace(b"\n1 0 obj", b"\n% PK\x03\x04\n1 0 obj"), id="pdf"),
-        pytest.param(b"PK\x03\x04%PDF-", id="zip"),
-    ],
-)
-def test_a_file_carrying_both_signatures_up_front_is_unreadable(data: bytes) -> None:
-    with pytest.raises(MessageDecodeError, match="remove the text before the file"):
-        detect_file(data)
 
 
 @pytest.mark.parametrize("fixture", ["signed.pdf", "signed.docx"], ids=["pdf", "docx"])
@@ -747,23 +706,6 @@ def test_text_naming_a_signature_before_a_signed_fragment_reads_the_fragment(
     (finding,) = report.findings
     assert finding.carrier is Carrier.BODY
     assert finding.verified
-
-
-@pytest.mark.parametrize(
-    "data",
-    [
-        pytest.param(b"see %PDF- spec\n<p>Hello</p>", id="unmarked-fragment"),
-        pytest.param(b"junk\n" + _PDF, id="unmarked-pdf-behind-bytes"),
-    ],
-)
-def test_a_signature_behind_text_with_no_marker_is_unreadable(
-    data: bytes, tmp_path: Path
-) -> None:
-    with pytest.raises(MessageDecodeError, match="remove the text before the file"):
-        detect_file(data)
-    path = tmp_path / "input.bin"
-    path.write_bytes(data)
-    assert cli.main([str(path), "--offline"]) == cli.EXIT_ERROR
 
 
 def test_a_header_led_message_without_a_file_signature_has_no_marker(

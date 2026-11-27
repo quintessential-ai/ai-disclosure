@@ -42,6 +42,7 @@ from ai_disclosure_verify.files import (
     is_pdf,
     ooxml_digest,
     ooxml_token,
+    ooxml_trailing,
     pdf_digest,
     pdf_token,
 )
@@ -555,18 +556,10 @@ def _is_alternative_text(
     )
 
 
-# PDF readers accept the header anywhere in the first 1024 bytes.
-_SIGNATURE_WINDOW = 1024
 # The first line of an RFC 5322 header field, or an mbox "From " line.
 _HEADER_FIELD = re.compile(rb"[!-9;-~]+:|From ")
 _HTML_TAG = re.compile(rb"<[!/A-Za-z]")
 _MARKER_ATTRIBUTE = re.compile(rb"data-ai-disclosure", re.IGNORECASE)
-
-
-_TEXT_BEFORE_A_FILE = (
-    "cannot tell a message from a PDF or Office file with text in front of "
-    "it: remove the text before the file and check again"
-)
 
 
 def detect_file(
@@ -574,9 +567,8 @@ def detect_file(
 ) -> DetectionReport:
     """Detect markers in an Office (OOXML) file, a PDF, a bare HTML document or an RFC 5322 message.
 
-    The type is read from the content, never the name, as the specification's
-    "Reading the input" sets out; a guess never hides a marker as
-    ``no_marker``.
+    The form is read from how the input starts, never its name, as the
+    specification's "Reading the input" sets out.
 
     Raises:
         MessageDecodeError: The file could not be read far enough to look
@@ -595,86 +587,37 @@ def _detect_file(
     data: bytes, keys: Mapping[str, Ed25519PublicKey] | None
 ) -> DetectionReport:
     text = data.removeprefix(b"\xef\xbb\xbf").lstrip()
-    window = data[:_SIGNATURE_WINDOW]
-    # A genuine PDF or Office file never carries the other's signature this early.
-    both = b"%PDF-" in window and b"PK\x03\x04" in window
-    if (is_ooxml(data) or is_pdf(data)) and both:
-        raise MessageDecodeError(_TEXT_BEFORE_A_FILE)
-    if is_ooxml(data):
-        return _detect_ooxml(data, keys)
+    # A file is recognised only from its first byte.
     if is_pdf(data):
         return _detect_pdf(data, keys)
+    if is_ooxml(data):
+        return _detect_ooxml(data, keys)
     # An editor may put a UTF-8 byte-order mark before the markup.
     if text.startswith(b"<"):
         return detect_html(data.decode("utf-8-sig", errors="replace"), keys)
     if _HEADER_FIELD.match(text):
         return _detect_header_led(data, text, keys)
-    if both:
-        raise MessageDecodeError(_TEXT_BEFORE_A_FILE)
-    if b"%PDF-" in window or b"PK\x03\x04" in window:
-        return _detect_file_behind_text(data, text, keys)
     if _HTML_TAG.search(text):
         return detect_html(data.decode("utf-8-sig", errors="replace"), keys)
     return detect_message(text, keys)
 
 
-def _detect_file_behind_text(
-    data: bytes, text: bytes, keys: Mapping[str, Ed25519PublicKey] | None
-) -> DetectionReport:
-    """A file signature in the first 1024 bytes but not at the start.
-
-    The file reading is reported when it finds a marker, then an HTML reading
-    that does; otherwise which one is meant cannot be told, and the input is
-    refused rather than guessed at.
-
-    Raises:
-        MessageDecodeError: No reading finds a marker.
-
-    """
-    try:
-        as_file = (
-            _detect_pdf(data, keys)
-            if b"%PDF-" in data[:_SIGNATURE_WINDOW]
-            else _detect_ooxml(data, keys)
-        )
-    except MessageDecodeError:
-        as_file = None
-    if as_file is not None and as_file.findings:
-        return as_file
-    if _HTML_TAG.search(text):
-        as_html = detect_html(data.decode("utf-8-sig", errors="replace"), keys)
-        if as_html.findings or (
-            as_html.unparseable is not None and _MARKER_ATTRIBUTE.search(text)
-        ):
-            return as_html
-    raise MessageDecodeError(_TEXT_BEFORE_A_FILE)
-
-
 def _detect_header_led(
     data: bytes, text: bytes, keys: Mapping[str, Ed25519PublicKey] | None
 ) -> DetectionReport:
-    """Input that starts like a header field: a message, else an HTML fragment.
+    """A message, or the HTML fragment a header-like first line starts.
 
-    When neither reading finds a marker and the input's first 1024 bytes hold
-    a PDF or zip signature, which reading is meant cannot be told, so the
-    input is refused rather than guessed at.
-
-    Raises:
-        MessageDecodeError: The input holds a file signature behind text.
-
+    The HTML reading stands only when it finds a marker, or cannot be parsed
+    while the input names ``data-ai-disclosure``.
     """
     report, has_html = _detect_message(text, keys)
-    if has_html or report.verdict is not Verdict.NONE:
+    if has_html or report.verdict is not Verdict.NONE or not _HTML_TAG.search(text):
         return report
-    if _HTML_TAG.search(text):
-        as_html = detect_html(data.decode("utf-8-sig", errors="replace"), keys)
-        if as_html.findings or (
-            as_html.unparseable is not None and _MARKER_ATTRIBUTE.search(text)
-        ):
-            return as_html
-    window = data[:_SIGNATURE_WINDOW]
-    if b"%PDF-" in window or b"PK\x03\x04" in window:
-        raise MessageDecodeError(_TEXT_BEFORE_A_FILE)
+    as_html = detect_html(data.decode("utf-8-sig", errors="replace"), keys)
+    if as_html.findings or (
+        as_html.unparseable is not None and _MARKER_ATTRIBUTE.search(text)
+    ):
+        return as_html
     return report
 
 
@@ -704,9 +647,11 @@ def _detect_ooxml(
     except _PACKAGE_ERRORS as exc:
         msg = f"cannot read the Office package: {exc}"
         raise MessageDecodeError(msg) from exc
-    return _detect_document(
+    report = _detect_document(
         token, keys, OOXML_CANONICALISATION, lambda: ooxml_digest(data)
     )
+    # Bytes after the package's end are not covered by its marker.
+    return replace(report, unmarked_content=token is not None and ooxml_trailing(data))
 
 
 def _detect_pdf(

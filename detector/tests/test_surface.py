@@ -497,31 +497,6 @@ def test_an_empty_disclosure_header_is_a_marker_attempt(value: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_a_pdf_after_a_few_leading_bytes_is_read_as_a_pdf() -> None:
-    pdf = (FIXTURES / "signed.pdf").read_bytes()
-
-    report = detect_file(b"\x00junk\r\n" + pdf, KEYS)
-
-    (finding,) = report.findings
-    assert finding.carrier is Carrier.FILE_METADATA
-    # The leading bytes are part of the signed revision's bytes, so it differs.
-    assert finding.content is ContentCheck.MISMATCH
-
-
-def test_a_pdf_header_past_the_first_1024_bytes_is_not_a_pdf() -> None:
-    pdf = (FIXTURES / "signed.pdf").read_bytes()
-
-    report = detect_file(b"\x00" * 1024 + pdf, KEYS)
-
-    assert all(f.carrier is not Carrier.FILE_METADATA for f in report.findings)
-
-
-def test_an_office_file_after_leading_bytes_is_read_as_an_office_file() -> None:
-    docx = (FIXTURES / "signed.docx").read_bytes()
-
-    assert detect_file(b"\x00junk" + docx, KEYS).verdict is Verdict.VERIFIED
-
-
 def test_a_fragment_starting_with_text_is_read_as_html(
     signed: tuple[str, str],
 ) -> None:

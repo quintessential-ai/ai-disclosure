@@ -633,6 +633,7 @@ prove nothing.
 
 Recompressing (stored or deflated) or reordering the package keeps the
 digest; changing any part's content (text, numbers, styles, images) breaks it.
+Bytes after the package's end are content the marker does not cover.
 
 ### `pdf-revision/1`
 
@@ -854,37 +855,25 @@ signatures are reported as not checked.
 
 ### Reading the input
 
-The detector tells the kind of input from its content, not its name, in
-this order:
+The command reads its input as one of four forms, decided by how the input
+starts:
 
-1. A zip signature (`PK` 03 04) at the start is an Office file; `%PDF-` at
-   the start is a PDF.
-2. After a UTF-8 byte-order mark and ASCII whitespace, `<` is an HTML body,
-   and a header field (a name of printable ASCII characters other than `:`,
-   then `:`, or an mbox `From ` line) is a message, read from that point.
-3. `%PDF-` (failing that, a zip signature) within the first 1024 bytes,
-   not at the start, is read as that file; if it holds no marker, the input
-   is read as an HTML body when it holds a tag; if neither finds a marker,
-   the input is ambiguous and is reported as unreadable (exit status 2).
-4. A tag anywhere (`<` followed by an ASCII letter, `/` or `!`) is an HTML
-   body, such as a fragment that starts with text.
-5. Anything else is a message.
+1. `%PDF-` at the first byte: a PDF.
+2. `PK\x03\x04` at the first byte: an Office file.
+3. `<`, after an optional UTF-8 byte-order mark and whitespace: an HTML body.
+4. A first line that looks like a header field, or an mbox `From ` line: a
+   message. If the message has no HTML body and no marker but holds a tag,
+   it is read again as an HTML body, as for a fragment that starts
+   `Note: …`.
+5. Anything else: an HTML body if it holds a tag, otherwise a message.
 
-If the first 1024 bytes hold both `%PDF-` and `PK\x03\x04`, the input is
-ambiguous and is reported as unreadable (exit status 2).
+A file is recognised only from its first byte. A PDF or Office file with
+anything in front of it is read by what it starts with, and its marker is
+not found: remove what is in front and check the file itself. So a message,
+an HTML file, a PDF or an Office file carrying a marker never reads
+`no_marker` as issued; once something is added in front of a file, it may.
 
-A fragment whose first line looks like a header field (`Note: …`) is read
-as a message first. When that message has no HTML body and no marker, the
-input is read again as an HTML body when it holds a tag, reported if it
-finds a marker, or if it is `unparseable` and the input holds
-`data-ai-disclosure`. If neither reading finds a marker and `%PDF-` or
-`PK\x03\x04` occurs within the input's first 1024 bytes, the input is
-ambiguous and is reported as unreadable (exit status 2): a PDF or Office
-file with text in front of it is checked once that text is removed. A
-message that only quotes a file signature, in its subject or text, is
-reported the same way. So the guess never
-turns a marked file or fragment into `no_marker`; the fragment's first line
-is text before its container, so its marker reads as quoted. A message whose
+A message whose
 MIME parts nest too deeply for the parser is reported as unreadable (exit status
 2), as an HTML body over the caps in [Parsing](#parsing) is `unparseable`.
 An Office file whose routing XML nests too deeply to serialise keeps its

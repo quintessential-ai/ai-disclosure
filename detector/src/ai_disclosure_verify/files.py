@@ -50,6 +50,10 @@ MAX_XML_PART_BYTES = 4 * 1024 * 1024
 _PACKAGE_COMPRESSION = frozenset({zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED})
 _READ_CHUNK = 64 * 1024
 _EOF = b"%%EOF"
+# The zip end-of-central-directory record: its signature, then 18 bytes, the
+# last two the length of the comment that follows it.
+_EOCD = b"PK\x05\x06"
+_EOCD_SIZE = 22
 
 
 def _pdf_name_pattern(name: str) -> bytes:
@@ -93,6 +97,15 @@ _PDF_NAMED_ESCAPES = {
 def is_ooxml(data: bytes) -> bool:
     """True for a zip container, the OOXML packaging."""
     return data.startswith(b"PK\x03\x04")
+
+
+def ooxml_trailing(data: bytes) -> bool:
+    """Whether bytes follow the package's end-of-central-directory record and its comment."""
+    end = data.rfind(_EOCD)
+    if end < 0 or len(data) < end + _EOCD_SIZE:
+        return False
+    comment = int.from_bytes(data[end + _EOCD_SIZE - 2 : end + _EOCD_SIZE], "little")
+    return len(data) > end + _EOCD_SIZE + comment
 
 
 def is_pdf(data: bytes) -> bool:
