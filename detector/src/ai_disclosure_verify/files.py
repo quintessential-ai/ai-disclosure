@@ -59,6 +59,10 @@ _ZIP64_END = b"PK\x06\x06"
 _ZIP64_LOCATOR = b"PK\x06\x07"
 _ZIP64_LOCATOR_SIZE = 20
 _DATA_DESCRIPTOR = b"PK\x07\x08"
+# The one extra field a package may carry (APPNOTE 4.5.3), and the most its
+# data can hold: two sizes, an offset and a disk number.
+_ZIP64_EXTRA_ID = 0x0001
+_ZIP64_EXTRA_MAX = 28
 # A part name holds no control character (ECMA-376 Part 2, 9.1.1), C1
 # included: a part name is an IRI, whose characters start at U+00A0. A line
 # feed in one would let two ``ooxml-parts/1`` listings read the same.
@@ -109,13 +113,10 @@ def is_ooxml(data: bytes) -> bool:
 
 
 def ooxml_uncovered(data: bytes) -> bool:
-    """Whether any byte of a package lies outside its parts' entries, directory and end record.
+    """Whether a package holds any byte its marker does not cover.
 
-    Each local entry must sit where the central directory places it, the
-    entries contiguous from byte 0; the directory must run up to the Zip64 end
-    record or the end record; nothing may follow the end record. A comment on
-    the end record is not covered either. Any package zipfile cannot open
-    counts as uncovered.
+    The rule is the specification's, at the end of ``ooxml-parts/1``. Any
+    package zipfile cannot open counts as uncovered.
     """
     try:
         layout = _zip_layout(data)
@@ -126,6 +127,14 @@ def ooxml_uncovered(data: bytes) -> bool:
     if layout is None:
         return True
     cd_start = layout
+    # The directory's own fields: what zipfile read from each record.
+    if any(
+        info.comment
+        or not _only_zip64(info.extra)
+        or (info.is_dir() and (info.compress_size or info.file_size))
+        for info in infos
+    ):
+        return True
     position = 0
     for index, info in enumerate(infos):
         following = (
@@ -141,8 +150,13 @@ def ooxml_uncovered(data: bytes) -> bool:
 def _zip_layout(data: bytes) -> int | None:
     """Where the central directory starts, or None when it and the end records do not fit."""
     end = data.rfind(_EOCD, max(0, len(data) - _EOCD_SIZE - 0xFFFF))
-    if end < 0 or len(data) != end + _EOCD_SIZE:
-        # No end record, or a comment or anything else after it.
+    if (
+        end < 0
+        or len(data) != end + _EOCD_SIZE
+        or data[end + _EOCD_SIZE - 2 : end + _EOCD_SIZE] != b"\x00\x00"
+    ):
+        # No end record, anything after it, or a comment declared, whether
+        # its bytes are present or not.
         return None
     cd_size = int.from_bytes(data[end + 12 : end + 16], "little")
     cd_start = int.from_bytes(data[end + 16 : end + 20], "little")
@@ -168,12 +182,15 @@ def _zip_layout(data: bytes) -> int | None:
 def _local_entry_end(
     data: bytes, info: zipfile.ZipInfo, start: int, following: int
 ) -> int | None:
-    """Where the local entry at ``start`` ends, or None when it is not one."""
+    """Where the local entry at ``start`` ends, or None when it is not one the marker covers."""
     if data[start : start + 4] != b"PK\x03\x04":
         return None
     name_length = int.from_bytes(data[start + 26 : start + 28], "little")
     extra_length = int.from_bytes(data[start + 28 : start + 30], "little")
-    end = start + 30 + name_length + extra_length + info.compress_size
+    extra_start = start + 30 + name_length
+    if not _only_zip64(data[extra_start : extra_start + extra_length]):
+        return None
+    end = extra_start + extra_length + info.compress_size
     if not info.flag_bits & 0x8:
         return end
     # A data descriptor: CRC and sizes, 4- or 8-byte, with or without its
@@ -185,6 +202,21 @@ def _local_entry_end(
         if end + size == following:
             return end + size
     return None
+
+
+def _only_zip64(extra: bytes) -> bool:
+    """Whether an extra-field block is empty or one well-formed Zip64 field."""
+    if not extra:
+        return True
+    if len(extra) < 4:
+        return False
+    field_id = int.from_bytes(extra[0:2], "little")
+    size = int.from_bytes(extra[2:4], "little")
+    return (
+        field_id == _ZIP64_EXTRA_ID
+        and size <= _ZIP64_EXTRA_MAX
+        and len(extra) == 4 + size
+    )
 
 
 def is_pdf(data: bytes) -> bool:
@@ -293,16 +325,10 @@ def _normalized_routing(data: bytes, tag: str, attribute: str, value: str) -> by
 def ooxml_digest(data: bytes) -> str:
     """``ooxml-parts/1``: SHA-256 over part names and hashes, with normalized package routing.
 
-    Only the selected custom-properties part and directory entries are omitted.
-    Routing XML uses C14N 2.0 with stripped text and rewritten prefixes, after
-    removing the custom-properties relationship and its content-type override.
-    Each sorted part contributes ``<name>\\n<base64url SHA-256>\\n``.
-    Duplicate parts, a control character in an entry name, unsafe XML and
-    ambiguous metadata relationships are rejected.
-    So is a package over ``MAX_PACKAGE_PARTS`` entries (directories included)
-    or ``MAX_PACKAGE_BYTES`` uncompressed, with a part neither stored nor
-    deflated, or with a routing or custom-properties part over
-    ``MAX_XML_PART_BYTES``. Other parts are hashed as they are inflated.
+    Follows the specification's steps. Raises ``ValueError``, or the error
+    zipfile or the XML parser raises, for a package step 1 refuses. Parts
+    other than the routing and custom-properties ones are hashed as they are
+    inflated.
     """
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         infos = _package_infos(zf)

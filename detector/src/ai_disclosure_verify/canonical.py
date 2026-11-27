@@ -398,11 +398,7 @@ _SURROGATE = re.compile("[\ud800-\udfff]")
 
 
 def _scalar_values(text: str) -> str:
-    """``text`` as WHATWG's scalar value string, which UTF-8 can encode.
-
-    A surrogate pair becomes the character it encodes and a lone surrogate
-    becomes U+FFFD, as a JavaScript ``TextEncoder`` does, instead of failing.
-    """
+    """``text`` as WHATWG's scalar value string, as a JavaScript ``TextEncoder`` reads it."""
     if _SURROGATE.search(text):
         return text.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
     return text

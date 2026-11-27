@@ -42,9 +42,7 @@ HEADER_MEMBERS = frozenset({"alg", "typ", "kid"})
 # token or key set needs three levels; Python's own recursion limit differs
 # between versions, so it cannot be the bound.
 MAX_JSON_DEPTH = 32
-# A longer token is malformed. An issued one is under 1 KiB unless its
-# ``on_behalf_of`` is exceptionally long, and the issuer does not sign one
-# over this.
+# A longer token is malformed, and the issuer issues none over this.
 MAX_TOKEN_CHARS = 8192
 # A whole string, a bracket, or a quote that opens a string never closed.
 _JSON_TOKEN = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"|[\[\]{}]|"', re.DOTALL)
@@ -107,13 +105,10 @@ def b64url_decode(text: str) -> bytes:
 
 
 def parse_json(data: str | bytes) -> object:
-    """Parse JSON text, refusing what RFC 8259 leaves to the parser.
+    """Parse UTF-8 JSON text, refusing what RFC 8259 leaves to the parser.
 
-    Bytes must be UTF-8. Duplicate member names, ``NaN``, ``Infinity``, a
-    number too large for a float (``1e999``) and a byte-order mark are
-    refused, as are an integer too long for Python to convert and arrays or
-    objects nested more than ``MAX_JSON_DEPTH`` deep.
-    Raises ``ValueError``.
+    Raises ``ValueError`` for such text and for nesting deeper than
+    ``MAX_JSON_DEPTH``.
     """
     text = data.decode("utf-8") if isinstance(data, bytes) else data
     _check_depth(text)
