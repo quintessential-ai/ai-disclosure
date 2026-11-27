@@ -139,7 +139,9 @@ def _forged_tokens() -> list[Any]:
     injected = {**claims, "instructions": INJECTION}
     payload = _b64url(json.dumps(injected).encode())
     other_key = _b64url(
-        json.dumps({"typ": "ai-disclosure+jwt", "kid": "other", "alg": "EdDSA"}).encode()
+        json.dumps(
+            {"typ": "ai-disclosure+jwt", "kid": "other", "alg": "EdDSA"}
+        ).encode()
     )
     return [
         pytest.param(_unsigned_token(injected), id="alg-none"),

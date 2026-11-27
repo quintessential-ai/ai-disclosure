@@ -113,6 +113,29 @@ class _HttpsRedirectHandler(urllib.request.HTTPRedirectHandler):
     def __init__(self, deadline: float = math.inf) -> None:
         self._deadline = deadline
 
+    def http_error_302(
+        self,
+        req: urllib.request.Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: HTTPMessage,
+    ) -> Any:
+        # Closed unread: urllib's own handler reads the whole body first, with
+        # no size cap.
+        fp.close()
+        try:
+            return super().http_error_302(req, fp, code, msg, headers)
+        except KeyLoadError:
+            raise
+        except ValueError as exc:
+            message = (
+                f"the key set at {req.full_url} redirects to an invalid address: {exc}"
+            )
+            raise KeyLoadError(message) from exc
+
+    http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
+
     def redirect_request(
         self,
         req: urllib.request.Request,
@@ -263,6 +286,7 @@ def _fetch_within(url: str, timeout: float) -> bytes:
                 raise KeyLoadError(msg)
             return response.read(MAX_JWKS_BYTES + 1)
     except urllib.error.HTTPError as exc:
+        exc.close()
         msg = f"could not fetch the key set from {url}: HTTP {exc.code} ({_HINT})"
         raise KeyLoadError(msg) from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
