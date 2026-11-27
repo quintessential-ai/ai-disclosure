@@ -18,7 +18,7 @@ import logging
 import re
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
@@ -101,7 +101,7 @@ def b64url_decode(text: str) -> bytes:
     return data
 
 
-def parse_json(data: str | bytes) -> Any:
+def parse_json(data: str | bytes) -> object:
     """Parse JSON text, refusing what RFC 8259 leaves to the parser.
 
     Bytes must be UTF-8. Duplicate member names, ``NaN``, ``Infinity`` and a
@@ -140,7 +140,7 @@ def _unique_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return members
 
 
-def _refuse_constant(name: str) -> Any:
+def _refuse_constant(name: str) -> NoReturn:
     msg = f"{name} is not JSON"
     raise ValueError(msg)
 

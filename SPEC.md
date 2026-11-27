@@ -640,8 +640,11 @@ The marker is written as an incremental update, after the file as generated.
 `content_sha256` is the unpadded base64url SHA-256 of the file's bytes up to
 and including the last `%%EOF` before that update. A verifier finds the token
 in the raw bytes and digests up to the last `%%EOF` that precedes it. The
-Info entry is a PDF literal string: its escapes are decoded first, as a
-writer may write any byte as one (`.` as `\056`).
+first occurrence of the property is read: the `/AIDisclosure` key, the
+`cpxai:AIDisclosure` element, or its XMP attribute form. An Info value is a
+PDF string, literal (escapes decoded, as a writer may write any byte as one,
+`.` as `\056`; balanced parentheses kept) or hexadecimal. A property with
+any other value, or none, is present without a token.
 
 Any change to the generated revision breaks the digest. A later incremental
 update appended after the marker does not, and is not covered by it. A tool

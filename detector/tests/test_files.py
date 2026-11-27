@@ -360,13 +360,62 @@ def test_an_office_property_without_a_token_is_a_malformed_token(
         b"/AIDisclosure (not-a-token)",
         b"/AIDisclosure (\xff\xfe.a.b)",
         b"<cpxai:AIDisclosure></cpxai:AIDisclosure>",
+        b"/AIDisclosure (not(a)token)",
+        b"/AIDisclosure (never closed",
+        b"/AIDisclosure <>",
+        b"/AIDisclosure <6E6F74>",
+        b"/AIDisclosure <<>>",
+        b"/AIDisclosure 7 0 R",
+        b"<cpxai:AIDisclosure/>",
+        b'<rdf:Description cpxai:AIDisclosure=""/>',
     ],
-    ids=["empty", "not-a-token", "not-ascii", "empty-xmp"],
+    ids=[
+        "empty",
+        "not-a-token",
+        "not-ascii",
+        "empty-xmp",
+        "nested-parens",
+        "unterminated",
+        "empty-hex",
+        "hex-not-a-token",
+        "dictionary",
+        "indirect-reference",
+        "self-closing-xmp",
+        "empty-xmp-attribute",
+    ],
 )
-def test_a_pdf_entry_without_a_token_is_a_malformed_token(entry: bytes) -> None:
+def test_a_pdf_entry_without_a_token_is_a_malformed_token(
+    entry: bytes, tmp_path: Path
+) -> None:
     update = b"3 0 obj << " + entry + b" >> endobj\ntrailer << /Info 3 0 R >>\n%%EOF\n"
+    data = _PDF + update
 
-    _assert_one_malformed_file_token(_PDF + update)
+    _assert_one_malformed_file_token(data)
+    path = tmp_path / "marked.pdf"
+    path.write_bytes(data)
+    assert cli.main([str(path), "--offline"]) == cli.EXIT_UNVERIFIED
+
+
+def test_a_longer_pdf_name_is_not_the_property() -> None:
+    data = _PDF + b"3 0 obj << /AIDisclosureX (x) >> endobj\n"
+
+    assert files.pdf_token(data) is None
+    assert detect_file(data).verdict is Verdict.NONE
+
+
+@pytest.mark.parametrize("form", ["hex", "xmp-attribute"])
+def test_a_token_in_another_pdf_string_form_verifies(pdf: bytes, form: str) -> None:
+    token = pdf.split(b"/AIDisclosure (")[1].split(b")")[0]
+    entry = (
+        b"/AIDisclosure <" + token.hex().upper().encode() + b">"
+        if form == "hex"
+        else b'<rdf:Description cpxai:AIDisclosure="' + token + b'"/>'
+    )
+    rewritten = pdf.replace(b"/AIDisclosure (" + token + b")", entry)
+    assert rewritten != pdf
+
+    verdict = detect_file(rewritten, KEYS).verdict
+    assert verdict is Verdict.VERIFIED_WITH_UNMARKED_CONTENT
 
 
 @pytest.mark.parametrize(
@@ -397,11 +446,50 @@ def test_a_pdf_info_string_is_read_with_its_escapes_decoded(
     assert found[0] == read.decode("ascii", errors="replace")
 
 
-def test_a_pdf_entry_stops_at_the_next_parenthesis() -> None:
-    found = files.pdf_token(_PDF + b"/AIDisclosure (a.b /AIDisclosure (c.d.e)")
+@pytest.mark.parametrize(
+    ("entry", "value"),
+    [
+        (b"/AIDisclosure (a(b)c)", "a(b)c"),
+        (b"/AIDisclosure <612E62 2E63>", "a.b.c"),
+        (b"/AIDisclosure <612>", "a "),
+        (b"/AIDisclosure <<>>", ""),
+        (b"<cpxai:AIDisclosure>a.b.c</cpxai:AIDisclosure>", "a.b.c"),
+        (b"<cpxai:AIDisclosure/>a.b.c<", ""),
+        (b"<rdf:Description cpxai:AIDisclosure='a.b.c'/>", "a.b.c"),
+    ],
+    ids=[
+        "balanced-parens",
+        "hex-with-space",
+        "hex-odd-digit",
+        "dictionary",
+        "xmp-element",
+        "self-closing-xmp",
+        "xmp-attribute",
+    ],
+)
+def test_a_pdf_property_value_is_read_by_its_form(entry: bytes, value: str) -> None:
+    found = files.pdf_token(_PDF + entry)
 
     assert found is not None
-    assert found[0] == "c.d.e"
+    assert found[0] == value
+
+
+def test_only_the_first_pdf_property_is_read() -> None:
+    found = files.pdf_token(_PDF + b"/AIDisclosure (bad) /AIDisclosure (a.b.c)")
+
+    assert found is not None
+    assert found[0] == "bad"
+
+
+def test_a_message_that_mentions_a_zip_signature_reads_as_the_message(
+    tmp_path: Path,
+) -> None:
+    data = b"Subject: x\n\nThe bytes PK\x03\x04 open a zip file.\n"
+
+    assert detect_file(data).verdict is Verdict.NONE
+    path = tmp_path / "note.eml"
+    path.write_bytes(data)
+    assert cli.main([str(path), "--offline"]) == cli.EXIT_NO_MARKER
 
 
 @pytest.mark.parametrize(

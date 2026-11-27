@@ -54,7 +54,7 @@ class KeyLoadError(ValueError):
 def load_jwks_file(path: Path) -> dict[str, Ed25519PublicKey]:
     """Read the keys from a local JWKS file."""
     try:
-        document = parse_json(path.read_text(encoding="utf-8"))
+        document = parse_json(path.read_bytes())
     except OSError as exc:
         msg = f"cannot read the key set {path}: {exc.strerror or exc}"
         raise KeyLoadError(msg) from exc
