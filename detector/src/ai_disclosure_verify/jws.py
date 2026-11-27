@@ -14,6 +14,7 @@ import base64
 import binascii
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
@@ -32,6 +33,13 @@ ALG_NONE = "none"
 # and ``crit`` included, makes the token invalid: a member a verifier ignores
 # may be one another verifier acts on.
 HEADER_MEMBERS = frozenset({"alg", "typ", "kid"})
+
+# Arrays and objects nested deeper than this make JSON unreadable here. A
+# token or key set needs three levels; Python's own recursion limit differs
+# between versions, so it cannot be the bound.
+MAX_JSON_DEPTH = 32
+# A whole string, a bracket, or a quote that opens a string never closed.
+_JSON_TOKEN = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"|[\[\]{}]|"', re.DOTALL)
 
 _B64URL_ALPHABET = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
@@ -94,13 +102,31 @@ def parse_json(data: str | bytes) -> Any:
     """Parse JSON text, refusing what RFC 8259 leaves to the parser.
 
     Bytes must be UTF-8. Duplicate member names, ``NaN``, ``Infinity`` and a
-    byte-order mark are refused, as is an integer too long for Python to
-    convert. Raises ``ValueError``.
+    byte-order mark are refused, as are an integer too long for Python to
+    convert and arrays or objects nested more than ``MAX_JSON_DEPTH`` deep.
+    Raises ``ValueError``.
     """
     text = data.decode("utf-8") if isinstance(data, bytes) else data
+    _check_depth(text)
     return json.loads(
         text, object_pairs_hook=_unique_members, parse_constant=_refuse_constant
     )
+
+
+def _check_depth(text: str) -> None:
+    depth = 0
+    for match in _JSON_TOKEN.finditer(text):
+        token = match.group()
+        if token == '"':
+            # Not JSON: the parser rejects it, within the depth counted so
+            # far. Scanning on would retry every later quote.
+            return
+        if token[0] == '"':
+            continue
+        depth += 1 if token in "[{" else -1
+        if depth > MAX_JSON_DEPTH:
+            msg = f"JSON nested more than {MAX_JSON_DEPTH} deep"
+            raise ValueError(msg)
 
 
 def _unique_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

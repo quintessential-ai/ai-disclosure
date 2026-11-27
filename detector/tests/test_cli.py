@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 import re
 import urllib.error
 from email.message import EmailMessage
@@ -77,11 +78,11 @@ def test_offline_without_a_key_set_reads_as_marked_but_unverified(
 def test_default_fetches_the_key_set_from_the_constant(
     eml: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    seen: list[tuple[str, float | None]] = []
+    seen: list[tuple[str, float]] = []
     agents: list[str] = []
 
-    def fake_urlopen(request: Any, timeout: float | None = None) -> FakeResponse:
-        seen.append((request.full_url, timeout))
+    def fake_urlopen(request: Any, deadline: float) -> FakeResponse:
+        seen.append((request.full_url, deadline - time.monotonic()))
         agents.append(request.get_header("User-agent"))
         return FakeResponse(json.dumps(golden_jwks()).encode(), keys.DEFAULT_JWKS_URL)
 
@@ -90,7 +91,9 @@ def test_default_fetches_the_key_set_from_the_constant(
     status = cli.main([str(eml), "--timeout", "3"])
 
     assert status == cli.EXIT_VERIFIED
-    assert seen == [(keys.DEFAULT_JWKS_URL, 3.0)]
+    ((url, left),) = seen
+    assert url == keys.DEFAULT_JWKS_URL
+    assert 2 < left <= 3
     # Cloudflare refuses a library's default User-Agent, so the fetch names itself.
     assert [a.partition("/")[0] for a in agents] == ["ai-disclosure-verify"]
     assert "Verdict: verified" in capsys.readouterr().out

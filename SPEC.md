@@ -130,8 +130,9 @@ with a JSON payload. Each of its three parts is unpadded base64url in its one
 canonical spelling: the unused low bits of the last character are zero. The
 header and the payload are UTF-8 JSON objects
 ([RFC 8259](https://www.rfc-editor.org/rfc/rfc8259)) with no member name
-repeated in any object and no `NaN` or `Infinity`. A token that is not is
-malformed, and is never verified.
+repeated in any object, no `NaN` or `Infinity`, and no array or object
+nested more than 32 deep. A token that is not is malformed, and is never
+verified.
 
 ### Protected header
 
@@ -244,10 +245,12 @@ carries must pass the same check.
   JSON objects. Any other element carrying `data-ai-disclosure`, or a block
   in any other shape, a block holding any other value included, is a
   violation. A browser hides the block, but a program reading the markup
-  sees its value, so only one block naming the original's `mid` (its
-  payload's `mid` claim, read without verifying it) is the message's own;
-  every other block in this shape is content outside the original container
-  (step 7 of [Verifying a message](#verifying-a-message)).
+  sees its value, so only the block holding the original body marker (step
+  6 of [Verifying a message](#verifying-a-message)) is the message's own,
+  and not even that one when the header token verifies and the block's own
+  token does not: copying a genuine header's `mid` into a block proves
+  nothing. Every other block in this shape is content outside the original
+  container (step 7).
 
 **Also violations:** every comment, including Outlook's conditional
 comments (`<!--[if mso]>…<![endif]-->` and `<!--[if !mso]><!-->…<!--<![endif]-->`),
@@ -478,7 +481,9 @@ target, image source, link title or image description changes it.
    verification: the verdict is `unparseable`. Otherwise collect the
    violations of the [markup allowlist](#markup-allowlist).
 2. Collect tokens: the `X-Complexio-AI-Disclosure` header, if present, and
-   every `data-ai-disclosure` attribute in the HTML body.
+   every `data-ai-disclosure` attribute in the HTML body. An empty header or
+   attribute is still a token, a malformed one: it is an attempt at a
+   marker, so it never reads as `no_marker`.
 3. For each token, decode the header and payload. Reject a token whose
    header is not as specified above (`typ` other than `ai-disclosure+jwt`,
    `crit` present, `alg` other than `EdDSA` or `none`), or whose payload is
@@ -521,11 +526,12 @@ target, image source, link title or image description changes it.
    URL item, any attribute-text item, or any text item with a character
    that step 2 of [Canonical string](#canonical-string) keeps, or does the
    message have any element outside the original container other than the
-   scaffolding (`html`,
-   `head`, `body`, and `title` or `meta` in `head`) and one hidden block in
-   its issued shape naming the original's `mid`? Then the message has content outside it, even
-   without text: an empty list item numbers itself, a run of line breaks
-   pushes the content off screen. A reply's quoted conversation is such
+   scaffolding (`html`, `head`, `body`, and `title` or `meta` in `head`)
+   and the hidden block in its issued shape that holds the original body
+   marker? Then the message has content outside it, even without text: an
+   empty list item numbers itself, a run of line breaks pushes the content
+   off screen. That hidden block counts too when the header token verifies
+   and the block's own token does not. A reply's quoted conversation is such
    content, and so is anything added around a copied fragment, in the head
    included.
 
@@ -657,13 +663,19 @@ It must not be attributed to the marker.
 Markers are signed with Ed25519. Each deployment of the system signs with its
 own key; the `kid` names it. Unless configured otherwise, the `kid` is the
 [RFC 7638](https://www.rfc-editor.org/rfc/rfc7638) thumbprint of the public
-key.
+key, and every key Complexio publishes is named that way. A `kid` is opaque
+on purpose: it names no customer, so the public key set does not reveal whom
+Complexio signs for. The organisation a marker was issued for is named in
+the signed token (`on_behalf_of`). Complexio vouches for every key in the
+set: a key in the set belongs to a deployment Complexio operates.
 
 Complexio publishes the public keys as a JWKS document
 ([RFC 7517](https://www.rfc-editor.org/rfc/rfc7517)) over HTTPS. Each key is
 an OKP JWK with `crv: Ed25519`, `use: sig` and `alg: EdDSA`. A retired key
-stays in the set for as long as messages it signed may need verifying; a
-compromised key is removed and its markers are no longer verifiable.
+stays in the set, so mail it signed still checks. A compromised key is
+removed, after which mail signed with it no longer verifies; that is
+intended. A key has no validity period in this version: a verifier does not
+check a token's `iat` against the time the key was in use.
 
 A verifier skips an entry it cannot use, as RFC 7517 section 5 asks, rather
 than rejecting the set: a `kty` other than `OKP` or `crv` other than
@@ -679,9 +691,11 @@ The key set is published at
 <https://ai-disclosure.complexio.com/.well-known/ai-disclosure-jwks.json>, served
 as `application/jwk-set+json` and open to cross-origin reads. Its address does
 not change when keys are added or retired. A verifier follows a redirect only
-to another `https` address, and bounds the whole fetch with one deadline, not
-only each read. The site refuses some HTTP libraries' default `User-Agent`
-(Python's `Python-urllib/3.x` gets HTTP 403), so a client names itself.
+to another `https` address. It bounds the fetch with one deadline, not only
+each read, and a fetch that times out leaves nothing running; name
+resolution is left to the system resolver's own timeout. The site refuses
+some HTTP libraries' default `User-Agent` (Python's `Python-urllib/3.x` gets
+HTTP 403), so a client names itself.
 
 ## Versioning
 
@@ -838,7 +852,12 @@ this order:
 5. Anything else is a message.
 
 A fragment whose first line looks like a header field (`Note: …`) is read
-as a message, and the markers in it are not found. A message whose MIME
+as a message first. When that message has no HTML body and no marker, and
+the input holds a tag, the input is read again as an HTML body, and that
+reading is reported if it finds a marker, or if it is `unparseable` and the
+input holds `data-ai-disclosure`. So the guess never turns a marked
+fragment into `no_marker`; the fragment's first line is text before its
+container, so its marker reads as quoted. A message whose MIME
 parts nest too deeply for the parser is reported as unreadable (exit status
 2), as an HTML body over the caps in [Parsing](#parsing) is `unparseable`.
 An Office file whose routing XML nests too deeply to serialise keeps its

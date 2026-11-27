@@ -653,27 +653,26 @@ class DocumentScan:
     # character unseen.
     elements: dict[str | None, int]
     content_items: dict[str | None, int]
-    # Hidden blocks in their issued shape, by the ``mid`` their token names.
-    hidden_blocks: dict[str, int] = field(default_factory=dict)
+    # Hidden blocks in their issued shape, by the ``order`` of their marker.
+    hidden_blocks: list[int] = field(default_factory=list)
 
-    def has_content_outside(self, region: ContentRegion) -> bool:
+    def has_content_outside(
+        self, region: ContentRegion, own_block: int | None = None
+    ) -> bool:
         """True when the document has text, URLs or elements the region does not hold.
 
         Any element counts, even one with no text or URL: an empty list item
         numbers itself, a run of line breaks pushes the content off screen.
-        Of the hidden blocks, only one naming the region's ``mid`` is not
-        content: any other can carry text for a reader of the markup.
+        Of the hidden blocks, only the one holding marker ``own_block`` (its
+        ``order``) is not content: any other can carry text for a reader of
+        the markup, whatever ``mid`` it names.
         """
-        return (
-            any(
-                count
-                for counts in (self.elements, self.content_items)
-                for mid, count in counts.items()
-                if mid != region.mid
-            )
-            or self.hidden_blocks.get(region.mid, 0) > 1
-            or any(mid != region.mid for mid in self.hidden_blocks)
-        )
+        return any(
+            count
+            for counts in (self.elements, self.content_items)
+            for mid, count in counts.items()
+            if mid != region.mid
+        ) or any(order != own_block for order in self.hidden_blocks)
 
 
 def scan_html(document: str) -> DocumentScan:
@@ -792,7 +791,7 @@ class _Walker:
         self.violations: list[Violation] = []
         self.elements: dict[str | None, int] = {}
         self.content_items: dict[str | None, int] = {}
-        self.hidden_blocks: dict[str, int] = {}
+        self.hidden_blocks: list[int] = []
         self._fostered: dict[int, int] = {}
         for anchor in fostered:
             self._fostered[id(anchor)] = self._fostered.get(id(anchor), 0) + 1
@@ -882,9 +881,9 @@ class _Walker:
             self._violation(local)
         attributes = element.attrib
         if MARKER_ATTR in attributes:
-            mid = self._marker_block_mid(element, attributes)
-            if mid is not None:
-                self.hidden_blocks[mid] = self.hidden_blocks.get(mid, 0) + 1
+            if self._is_marker_block(element, attributes):
+                # ``_enter`` has just recorded this element's marker.
+                self.hidden_blocks.append(len(self.markers) - 1)
                 return False
             self._violation(f"{local}[{MARKER_ATTR}]")
             return True
@@ -902,13 +901,12 @@ class _Walker:
                 self._violation(f"{local}[{name}]")
         return content
 
-    def _marker_block_mid(
-        self, element: Element, attributes: dict[str, str]
-    ) -> str | None:
-        """The ``mid`` a hidden block in its issued shape names, else None.
+    def _is_marker_block(self, element: Element, attributes: dict[str, str]) -> bool:
+        """True for a hidden block in its issued shape.
 
         As issued, the block is outside any container, empty, and carries a
-        compact JWS; any other value is free text a reader of the markup sees.
+        compact JWS naming a ``mid``; any other value is free text a reader of
+        the markup sees.
         """
         if not (
             element.tag == "div"
@@ -919,14 +917,15 @@ class _Walker:
             and not element.text
             and len(element) == 0
         ):
-            return None
-        return _token_mid(attributes[MARKER_ATTR])
+            return False
+        return _token_mid(attributes[MARKER_ATTR]) is not None
 
     def _enter(
         self, element: Element, local: str, context: _Context, *, html_element: bool
     ) -> None:
         marker = element.get(MARKER_ATTR)
-        if marker:
+        # An empty value is still an attempt at a marker, and reads as one.
+        if marker is not None:
             leads = not (self._seen_content or self._blockquotes or self._open)
             self.markers.append(
                 BodyMarker(value=marker, order=len(self.markers), leads=leads)

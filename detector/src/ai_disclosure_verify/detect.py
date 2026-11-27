@@ -403,7 +403,7 @@ def _detect_html(
         return DetectionReport((), ai_generated_header, unparseable=str(exc)), None
     findings: list[Finding] = []
     header_mid: str | None = None
-    if header_token:
+    if header_token is not None:
         header = _check_token(
             header_token, scan, keys, Carrier.HEADER, Placement.ORIGINAL
         )
@@ -413,6 +413,8 @@ def _detect_html(
             header = replace(header, content=ContentCheck.NOT_LEADING)
         findings.append(header)
     original_region: ContentRegion | None = None
+    # Index in ``body``, which is also the marker's ``order``.
+    original: int | None = None
     body: list[Finding] = []
     orphan: int | None = None
     for marker in scan.markers:
@@ -427,6 +429,7 @@ def _detect_html(
         own = header_mid is None or mid == header_mid
         if original_region is None and region is not None and region.leads and own:
             original_region = region
+            original = len(body)
             finding = replace(finding, placement=Placement.ORIGINAL)
         elif region is None and marker.leads and own and orphan is None:
             orphan = len(body)
@@ -438,11 +441,21 @@ def _detect_html(
     if original_region is None and header_mid is not None:
         candidate = scan.regions.get(header_mid)
         original_region = candidate if candidate and candidate.leads else None
+    # The original's hidden block is not content, unless the header verifies
+    # and the block's own token does not: a block that copies a genuine
+    # header's mid still carries text for a reader of the markup.
+    vouched = any(f.verified for f in findings if f.placement is Placement.ORIGINAL)
+    own_block = (
+        original
+        if original is not None and (body[original].verified or not vouched)
+        else None
+    )
     report = DetectionReport(
         tuple(findings),
         ai_generated_header,
         unmarked_content=(
-            original_region is not None and scan.has_content_outside(original_region)
+            original_region is not None
+            and scan.has_content_outside(original_region, own_block)
         ),
         disallowed_markup=_disallowed_markup(
             scan, original_region.mid if original_region else None
@@ -479,6 +492,13 @@ def detect_message(
             decode, or the message nests parts too deeply to parse.
 
     """
+    return _detect_message(raw, keys)[0]
+
+
+def _detect_message(
+    raw: bytes, keys: Mapping[str, Ed25519PublicKey] | None
+) -> tuple[DetectionReport, bool]:
+    """``detect_message``'s report, and whether the message has an HTML body."""
     try:
         message = message_from_bytes(raw, policy=policy.default)
         body = message.get_body(preferencelist=("html",))
@@ -495,12 +515,12 @@ def detect_message(
     report, region = _detect_html(
         document,
         keys,
-        header_token=str(header_token).strip() if header_token else None,
+        header_token=str(header_token).strip() if header_token is not None else None,
         ai_generated_header=str(flag).strip() if flag is not None else None,
     )
     if region is not None and others:
         report = replace(report, unmarked_content=True)
-    return report
+    return report, body is not None
 
 
 def _other_parts(message: MIMEPart, body: MIMEPart | None) -> list[MIMEPart]:
@@ -551,6 +571,7 @@ _SIGNATURE_WINDOW = 1024
 # The first line of an RFC 5322 header field, or an mbox "From " line.
 _HEADER_FIELD = re.compile(rb"[!-9;-~]+:|From ")
 _HTML_TAG = re.compile(rb"<[!/A-Za-z]")
+_MARKER_ATTRIBUTE = re.compile(rb"data-ai-disclosure", re.IGNORECASE)
 
 
 def detect_file(
@@ -563,6 +584,12 @@ def detect_file(
     ``<`` (HTML) or a header field (a message); a PDF or zip signature in
     the first 1024 bytes; any tag (``<`` then a letter, ``/`` or ``!``)
     anywhere (HTML). Anything else is read as a message.
+
+    Input read as a message for its first line that has no HTML body and no
+    marker, but holds a tag, is read again as HTML, such as a fragment that
+    starts ``Note: ...``. That reading is reported when it finds a marker,
+    or when it is ``unparseable`` and the input holds ``data-ai-disclosure``,
+    so the guess never hides a marker as ``no_marker``.
 
     Raises:
         MessageDecodeError: The file could not be read far enough to look
@@ -590,7 +617,7 @@ def _detect_file(
     if text.startswith(b"<"):
         return detect_html(data.decode("utf-8-sig", errors="replace"), keys)
     if _HEADER_FIELD.match(text):
-        return detect_message(text, keys)
+        return _detect_header_led(data, text, keys)
     if b"%PDF-" in window:
         return _detect_pdf(data, keys)
     if b"PK\x03\x04" in window:
@@ -598,6 +625,21 @@ def _detect_file(
     if _HTML_TAG.search(text):
         return detect_html(data.decode("utf-8-sig", errors="replace"), keys)
     return detect_message(text, keys)
+
+
+def _detect_header_led(
+    data: bytes, text: bytes, keys: Mapping[str, Ed25519PublicKey] | None
+) -> DetectionReport:
+    """Input that starts like a header field: a message, or else an HTML fragment."""
+    report, has_html = _detect_message(text, keys)
+    if has_html or report.verdict is not Verdict.NONE or not _HTML_TAG.search(text):
+        return report
+    as_html = detect_html(data.decode("utf-8-sig", errors="replace"), keys)
+    if as_html.findings or (
+        as_html.unparseable is not None and _MARKER_ATTRIBUTE.search(text)
+    ):
+        return as_html
+    return report
 
 
 def _detect_ooxml(
