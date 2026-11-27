@@ -51,7 +51,7 @@ ai-disclosure-verify message.eml --offline      # signed labels read as `ai_mark
 | Result | What it means |
 | --- | --- |
 | `verified` | The label is genuine: Complexio's system wrote the message and signed it. Its words and links are the ones signed, and the message contains nothing else. The check ignores spacing (`1 000` and `1000` read the same) and how the text is laid out, and it checks where each link goes, not how much of the text the link covers. In an email, a plain-text alternative to the HTML body is not checked: mail programs show the HTML, but one set to show plain text shows that part instead, and it may say something else. |
-| `verified_with_unmarked_content` | The label is genuine and the signed words and links have not changed. But the message also carries something the label does not cover, so do not treat that part as covered: for example, a quoted earlier email, formatting that could change how the text is shown, or another part of the email, such as an inline image or a second HTML part. A PDF never reads better than this (see below). |
+| `verified_with_unmarked_content` | The label is genuine and the signed words and links have not changed. But the message also carries something the label does not cover, so do not treat that part as covered: for example, a quoted earlier email, formatting that could change how the text is shown, or another part of the email, such as an inline image or a second HTML part. A verified PDF always reads this way, and so does a verified Office file with bytes outside its package's records (see below). |
 | `ai_marked_unverified` | The message says it was written by an AI system, but the check could not confirm the label. For example, the text was changed after it was signed, or the label is not signed. |
 | `quoted_only` | This message is not labelled itself. It only quotes an earlier labelled message. |
 | `no_marker` | The message carries no AI-disclosure label. |
@@ -63,6 +63,11 @@ cannot confirm the label.
 A PDF's label is written as an update appended to the finished file, and the label cannot sign
 the update that carries it. Anything else in that update, page changes included, is not
 covered, so a genuine PDF label reads `verified_with_unmarked_content`, never `verified`.
+
+An Office file's label covers its parts. Every other byte of the file belongs to the package's
+records; a byte outside them (text appended after the end of the file, a zip comment, or bytes
+between its entries) is not covered, and the file reads `verified_with_unmarked_content`
+(exit status 4).
 
 Until a deployment's signing key is published in the key set, its labels are unsigned, and
 every check of its mail reads `ai_marked_unverified`.
