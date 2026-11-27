@@ -29,6 +29,12 @@ jobs:
           enable-cache: true
           cache-dependency-glob: detector/uv.lock
           python-version: ${{ matrix.python }}
+      - name: Lint
+        if: matrix.python == '3.12'
+        run: uvx ruff@0.12.8 check .
+      - name: Format
+        if: matrix.python == '3.12'
+        run: uvx ruff@0.12.8 format --check .
       - name: Tests
         run: uv run --locked pytest
       - name: Published key set
