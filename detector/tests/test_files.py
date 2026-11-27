@@ -8,6 +8,7 @@ import io
 import json
 import re
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -652,13 +653,157 @@ def test_bytes_after_a_signed_package_are_not_covered(
     )
 
 
-def test_a_package_comment_is_part_of_the_package(docx: bytes) -> None:
+def _eocd(package: bytes) -> int:
+    return package.rindex(b"PK\x05\x06")
+
+
+def _cd_bounds(package: bytes) -> tuple[int, int]:
+    end = _eocd(package)
+    start = int.from_bytes(package[end + 16 : end + 20], "little")
+    return start, end
+
+
+def _with_gap(package: bytes, gap: bytes) -> bytes:
+    """``gap`` between the first two local entries, every offset after it moved."""
+    with zipfile.ZipFile(io.BytesIO(package)) as zf:
+        split = sorted(info.header_offset for info in zf.infolist())[1]
+    data = bytearray(package[:split] + gap + package[split:])
+    cd_start, end = _cd_bounds(bytes(data))
+    cd_start += len(gap)
+    position = cd_start
+    while data[position : position + 4] == b"PK\x01\x02":
+        offset = int.from_bytes(data[position + 42 : position + 46], "little")
+        if offset >= split:
+            data[position + 42 : position + 46] = (offset + len(gap)).to_bytes(
+                4, "little"
+            )
+        lengths = [
+            int.from_bytes(data[position + at : position + at + 2], "little")
+            for at in (28, 30, 32)
+        ]
+        position += 46 + sum(lengths)
+    data[end + 16 : end + 20] = cd_start.to_bytes(4, "little")
+    return bytes(data)
+
+
+def _with_copied_directory(package: bytes, text: bytes) -> bytes:
+    """Text, then a copy of the directory and an end record that points at the copy."""
+    cd_start, end = _cd_bounds(package)
+    copy_at = len(package) + len(text)
+    record = bytearray(package[end : end + 22])
+    record[16:20] = copy_at.to_bytes(4, "little")
+    return package + text + package[cd_start:end] + bytes(record)
+
+
+_TEXT = b"Pay to account 1234\n"
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        pytest.param(lambda p: p + _TEXT, id="appended"),
+        pytest.param(
+            lambda p: p[:-2] + b"\xff\xff" + _TEXT, id="inflated-comment-length"
+        ),
+        pytest.param(
+            lambda p: p[:-2] + len(_TEXT).to_bytes(2, "little") + _TEXT,
+            id="comment-length-covering-the-text",
+        ),
+        pytest.param(lambda p: _with_copied_directory(p, _TEXT), id="copied-directory"),
+        pytest.param(lambda p: _with_gap(p, _TEXT), id="gap-between-entries"),
+    ],
+)
+def test_bytes_outside_the_package_records_are_not_covered(
+    docx: bytes,
+    jwks_file: Path,
+    tmp_path: Path,
+    tamper: Callable[[bytes], bytes],
+) -> None:
+    data = tamper(docx)
+
+    assert detect_file(data, KEYS).verdict is Verdict.VERIFIED_WITH_UNMARKED_CONTENT
+    assert (
+        _cli(tmp_path, "input.docx", data, jwks_file)
+        == cli.EXIT_VERIFIED_WITH_UNMARKED_CONTENT
+    )
+
+
+def test_a_local_entry_away_from_its_directory_offset_is_not_covered(
+    docx: bytes,
+) -> None:
+    """The entries still run back to back, but not where the directory says."""
+    extra = int.from_bytes(docx[28:30], "little")
+    name = int.from_bytes(docx[26:28], "little")
+    data = bytearray(docx)
+    # Widen the first entry's extra field over 8 inserted bytes; leave the
+    # directory's entry offsets as they were.
+    data[28:30] = (extra + 8).to_bytes(2, "little")
+    data[30 + name + extra : 30 + name + extra] = b"\x00" * 8
+    cd_start, end = _cd_bounds(bytes(data))
+    data[end + 16 : end + 20] = (cd_start + 8).to_bytes(4, "little")
+
+    assert files.ooxml_uncovered(bytes(data)) is True
+
+
+def test_a_directory_that_stops_short_of_the_end_record_is_not_covered(
+    docx: bytes,
+) -> None:
+    end = _eocd(docx)
+    data = docx[:end] + b"text" + docx[end:]
+
+    assert files._zip_layout(data) is None
+    assert files.ooxml_uncovered(data) is True
+
+
+def test_a_package_comment_is_not_covered(
+    docx: bytes, jwks_file: Path, tmp_path: Path
+) -> None:
+    # The comment is outside ooxml-parts/1's digest, so it is unsigned text.
     buffer = io.BytesIO(docx)
     with zipfile.ZipFile(buffer, "a") as zf:
         zf.comment = b"written by the editor"
+    data = buffer.getvalue()
 
-    assert files.ooxml_trailing(buffer.getvalue()) is False
-    assert files.ooxml_trailing(buffer.getvalue() + b"x") is True
+    assert detect_file(data, KEYS).verdict is Verdict.VERIFIED_WITH_UNMARKED_CONTENT
+    assert (
+        _cli(tmp_path, "input.docx", data, jwks_file)
+        == cli.EXIT_VERIFIED_WITH_UNMARKED_CONTENT
+    )
+
+
+class _Unseekable(io.RawIOBase):
+    """A stream zipfile cannot seek back in, so it writes data descriptors."""
+
+    def __init__(self) -> None:
+        self.written = bytearray()
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, data: Any) -> int:
+        self.written += data
+        return len(data)
+
+
+def test_a_package_written_with_data_descriptors_is_covered(docx: bytes) -> None:
+    stream = _Unseekable()
+    with (
+        zipfile.ZipFile(io.BytesIO(docx)) as source,
+        zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED) as target,
+    ):
+        for info in source.infolist():
+            target.writestr(info.filename, source.read(info))
+    repacked = bytes(stream.written)
+    with zipfile.ZipFile(io.BytesIO(repacked)) as check:
+        assert all(info.flag_bits & 0x8 for info in check.infolist())
+
+    assert detect_file(repacked, KEYS).verdict is Verdict.VERIFIED
+    assert files.ooxml_uncovered(repacked) is False
+
+
+def test_a_signed_package_alone_is_covered(docx: bytes) -> None:
+    assert files.ooxml_uncovered(docx) is False
+    assert detect_file(docx, KEYS).verdict is Verdict.VERIFIED
 
 
 def test_a_mail_quoting_a_file_signature_has_no_marker() -> None:

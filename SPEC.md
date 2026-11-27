@@ -561,7 +561,7 @@ Verdicts:
 | Verdict | Meaning |
 | --- | --- |
 | `verified` | The original marker is valid, its digest matches, its container holds only allowlisted markup, and outside it the message holds nothing but empty scaffolding (`html`, `head`, `body`, an allowed `meta`, an empty `title`) and the hidden block. In an email, no other part a reader may see is present (step 7); a plain-text alternative to the HTML body is not checked. The words and links are the signed ones; the digest does not cover whitespace, presentation, or how much text a link spans (see [Transport limits](#transport-limits)). |
-| `verified_with_unmarked_content` | The signed text is intact, but styling or markup in or around it, which could change how it is shown, is not vouched for, nor is the rest of the message. The original marker is valid and its digest matches, but its container holds a violation of the markup allowlist (styling, a class, a comment, an element outside the list), or the message has content outside its container (text, links, images or any other element, or another part of an email), or violations outside it (a quoted conversation, a head style sheet, a conditional comment, content added around a copied fragment). None of that may be attributed to the marker. A verified PDF always reads this way (see [Verifying a file](#verifying-a-file)). |
+| `verified_with_unmarked_content` | The signed text is intact, but styling or markup in or around it, which could change how it is shown, is not vouched for, nor is the rest of the message. The original marker is valid and its digest matches, but its container holds a violation of the markup allowlist (styling, a class, a comment, an element outside the list), or the message has content outside its container (text, links, images or any other element, or another part of an email), or violations outside it (a quoted conversation, a head style sheet, a conditional comment, content added around a copied fragment). None of that may be attributed to the marker. A verified PDF always reads this way, and so does a verified Office file with bytes outside its package's records (see [Verifying a file](#verifying-a-file)). |
 | `ai_marked_unverified` | The message carries its own marker but it does not verify: unsigned, bad or unknown signature, rejected token, content changed after signing (for example, a draft a person edited before sending), or missing or non-leading content, a leading hidden block whose container was removed included. Also returned, when no marker of the message's own verifies, for any `X-AI-Generated` header, whatever its value, and for an earlier-format marker or a malformed body token anywhere in the message, a quoted trail included (see below): neither can be placed. A reply that merely quotes an earlier-format message therefore reads `ai_marked_unverified`; a caller checking mail it did not label itself must not read this verdict as "this message was labelled". Beside an original that verifies, such a marker is content outside its container, and the verdict is `verified_with_unmarked_content`; a malformed header token is listed as rejected and leaves the verdict as it is. |
 | `quoted_only` | Every marker is a quoted copy; the message quotes a marked message but was not itself marked. |
 | `no_marker` | No marker found. |
@@ -633,7 +633,10 @@ prove nothing.
 
 Recompressing (stored or deflated) or reordering the package keeps the
 digest; changing any part's content (text, numbers, styles, images) breaks it.
-Bytes after the package's end are content the marker does not cover.
+Every byte of the package belongs to a part's local entry, the central
+directory or the end record, each where the central directory and the end
+record place it. Any other byte, before, between or after them, the end
+record's comment included, is content the marker does not cover.
 
 ### `pdf-revision/1`
 
@@ -675,7 +678,9 @@ anything but a token, is a malformed token, never `no_marker`. For step 4,
 recompute the digest for the token's `canon`; a token whose `canon` does not
 belong to the file type is unsupported. The verdict is
 `verified` when the signature is valid and the digest matches, and
-`ai_marked_unverified` otherwise. PDF verification always reports
+`ai_marked_unverified` otherwise. An Office file with a byte outside its
+package's records reports `verified_with_unmarked_content` instead of
+`verified`, with CLI exit status 4. PDF verification always reports
 `verified_with_unmarked_content` instead of `verified` when the revision's
 signature and digest match, with CLI exit status 4: the marker-bearing update
 itself, including any page changes it contains, is outside the signature.
@@ -845,7 +850,7 @@ Exit status:
 | 1 | `no_marker` |
 | 2 | The message or key set could not be read (missing file, undecodable charset, input nested too deeply, malformed JWKS, key set not fetched), or `unparseable` |
 | 3 | `ai_marked_unverified` or `quoted_only` |
-| 4 | `verified_with_unmarked_content`, which includes every verified PDF |
+| 4 | `verified_with_unmarked_content`, which includes every verified PDF and a verified Office file with bytes outside its package's records |
 
 By default the key set is fetched over HTTPS from the published location,
 only when a signed marker needs it; `--timeout` sets how long to wait for
@@ -855,8 +860,8 @@ signatures are reported as not checked.
 
 ### Reading the input
 
-The command reads its input as one of four forms, decided by how the input
-starts:
+The command reads its input as one of four forms (a PDF, an Office file, an
+HTML body or a message), decided by how the input starts:
 
 1. `%PDF-` at the first byte: a PDF.
 2. `PK\x03\x04` at the first byte: an Office file.
@@ -864,7 +869,9 @@ starts:
 4. A first line that looks like a header field, or an mbox `From ` line: a
    message. If the message has no HTML body and no marker but holds a tag,
    it is read again as an HTML body, as for a fragment that starts
-   `Note: …`.
+   `Note: …`; that reading stands only when it finds a marker, or is
+   `unparseable` and the input names `data-ai-disclosure`. Otherwise the
+   message reading stands.
 5. Anything else: an HTML body if it holds a tag, otherwise a message.
 
 A file is recognised only from its first byte. A PDF or Office file with

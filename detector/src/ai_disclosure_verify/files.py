@@ -50,10 +50,15 @@ MAX_XML_PART_BYTES = 4 * 1024 * 1024
 _PACKAGE_COMPRESSION = frozenset({zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED})
 _READ_CHUNK = 64 * 1024
 _EOF = b"%%EOF"
-# The zip end-of-central-directory record: its signature, then 18 bytes, the
-# last two the length of the comment that follows it.
+# Zip records (APPNOTE 4.3): the end of central directory record, 22 bytes
+# whose last two give the length of the comment after it; the Zip64 end record
+# and its 20-byte locator; and a data descriptor's optional signature.
 _EOCD = b"PK\x05\x06"
 _EOCD_SIZE = 22
+_ZIP64_END = b"PK\x06\x06"
+_ZIP64_LOCATOR = b"PK\x06\x07"
+_ZIP64_LOCATOR_SIZE = 20
+_DATA_DESCRIPTOR = b"PK\x07\x08"
 
 
 def _pdf_name_pattern(name: str) -> bytes:
@@ -99,13 +104,83 @@ def is_ooxml(data: bytes) -> bool:
     return data.startswith(b"PK\x03\x04")
 
 
-def ooxml_trailing(data: bytes) -> bool:
-    """Whether bytes follow the package's end-of-central-directory record and its comment."""
-    end = data.rfind(_EOCD)
-    if end < 0 or len(data) < end + _EOCD_SIZE:
-        return False
-    comment = int.from_bytes(data[end + _EOCD_SIZE - 2 : end + _EOCD_SIZE], "little")
-    return len(data) > end + _EOCD_SIZE + comment
+def ooxml_uncovered(data: bytes) -> bool:
+    """Whether any byte of a package lies outside its parts' entries, directory and end record.
+
+    Each local entry must sit where the central directory places it, the
+    entries contiguous from byte 0; the directory must run up to the Zip64 end
+    record or the end record; nothing may follow the end record. A comment on
+    the end record is not covered either. Any package zipfile cannot open
+    counts as uncovered.
+    """
+    try:
+        layout = _zip_layout(data)
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            infos = sorted(zf.infolist(), key=lambda info: info.header_offset)
+    except (zipfile.BadZipFile, ValueError, NotImplementedError, OSError):
+        return True
+    if layout is None:
+        return True
+    cd_start = layout
+    position = 0
+    for index, info in enumerate(infos):
+        following = (
+            infos[index + 1].header_offset if index + 1 < len(infos) else cd_start
+        )
+        entry_end = _local_entry_end(data, info, position, following)
+        if info.header_offset != position or entry_end is None:
+            return True
+        position = entry_end
+    return position != cd_start
+
+
+def _zip_layout(data: bytes) -> int | None:
+    """Where the central directory starts, or None when it and the end records do not fit."""
+    end = data.rfind(_EOCD, max(0, len(data) - _EOCD_SIZE - 0xFFFF))
+    if end < 0 or len(data) != end + _EOCD_SIZE:
+        # No end record, or a comment or anything else after it.
+        return None
+    cd_size = int.from_bytes(data[end + 12 : end + 16], "little")
+    cd_start = int.from_bytes(data[end + 16 : end + 20], "little")
+    cd_end = end
+    locator = end - _ZIP64_LOCATOR_SIZE
+    if locator >= 0 and data[locator : locator + 4] == _ZIP64_LOCATOR:
+        record = int.from_bytes(data[locator + 8 : locator + 16], "little")
+        if data[record : record + 4] != _ZIP64_END:
+            return None
+        record_size = int.from_bytes(data[record + 4 : record + 12], "little")
+        if record + 12 + record_size != locator:
+            return None
+        cd_size = int.from_bytes(data[record + 40 : record + 48], "little")
+        cd_start = int.from_bytes(data[record + 48 : record + 56], "little")
+        cd_end = record
+    # zipfile's own offset reckoning already shifts every entry when this
+    # fails; the check states the rule for readers that do not.
+    if cd_start + cd_size != cd_end:
+        return None
+    return cd_start
+
+
+def _local_entry_end(
+    data: bytes, info: zipfile.ZipInfo, start: int, following: int
+) -> int | None:
+    """Where the local entry at ``start`` ends, or None when it is not one."""
+    if data[start : start + 4] != b"PK\x03\x04":
+        return None
+    name_length = int.from_bytes(data[start + 26 : start + 28], "little")
+    extra_length = int.from_bytes(data[start + 28 : start + 30], "little")
+    end = start + 30 + name_length + extra_length + info.compress_size
+    if not info.flag_bits & 0x8:
+        return end
+    # A data descriptor: CRC and sizes, 4- or 8-byte, with or without its
+    # signature. The one that reaches the next record is the one written.
+    for size in (12, 16, 20, 24):
+        has_signature = size in (16, 24)
+        if has_signature and data[end : end + 4] != _DATA_DESCRIPTOR:
+            continue
+        if end + size == following:
+            return end + size
+    return None
 
 
 def is_pdf(data: bytes) -> bool:
