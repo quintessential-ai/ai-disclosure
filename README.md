@@ -30,8 +30,9 @@ The command prints one of the results below and what it means. It also reads an 
 Office file (`.docx`, `.xlsx`, `.pptx`) or a PDF written by Complexio Stevie.
 
 It fetches the public key set over HTTPS by default, only when the message carries a signed
-label. `--timeout SECONDS` bounds the fetch, not only each read (the default is 10); looking
-up the host's name is left to the system's resolver. The checker names itself as
+label. Connecting, the TLS handshake, every read and every redirect must all finish within
+`--timeout SECONDS` of the start (the default is 10, at most 3600); looking up the host's
+name is left to the system's resolver and is not counted. The checker names itself as
 `ai-disclosure-verify/VERSION`, since the key set's host (Cloudflare) refuses Python's default
 `Python-urllib` with HTTP 403, and it follows a redirect only to another `https` address. To
 check against a local copy of the key set, or without the network:

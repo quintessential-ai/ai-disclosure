@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import http.client
 import json
-import time
 import re
 import urllib.error
 from email.message import EmailMessage
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -82,18 +83,17 @@ def test_default_fetches_the_key_set_from_the_constant(
     agents: list[str] = []
 
     def fake_urlopen(request: Any, deadline: float) -> FakeResponse:
-        seen.append((request.full_url, deadline - time.monotonic()))
+        seen.append((request.full_url, deadline))
         agents.append(request.get_header("User-agent"))
         return FakeResponse(json.dumps(golden_jwks()).encode(), keys.DEFAULT_JWKS_URL)
 
     monkeypatch.setattr(keys, "urlopen", fake_urlopen)
+    monkeypatch.setattr(keys, "time", SimpleNamespace(monotonic=lambda: 100.0))
 
     status = cli.main([str(eml), "--timeout", "3"])
 
     assert status == cli.EXIT_VERIFIED
-    ((url, left),) = seen
-    assert url == keys.DEFAULT_JWKS_URL
-    assert 2 < left <= 3
+    assert seen == [(keys.DEFAULT_JWKS_URL, 103.0)]
     # Cloudflare refuses a library's default User-Agent, so the fetch names itself.
     assert [a.partition("/")[0] for a in agents] == ["ai-disclosure-verify"]
     assert "Verdict: verified" in capsys.readouterr().out
@@ -167,3 +167,56 @@ def test_malformed_key_set_is_an_error(
     bad.write_text("[]", encoding="utf-8")
 
     assert cli.main([str(eml), "--jwks", str(bad)]) == cli.EXIT_ERROR
+
+
+def test_a_bad_http_response_is_a_key_set_error(
+    eml: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def bad_status(*_: object, **__: object) -> None:
+        raise http.client.BadStatusLine("garbage")
+
+    monkeypatch.setattr(keys, "urlopen", bad_status)
+
+    status = cli.main([str(eml)])
+
+    captured = capsys.readouterr()
+    assert status == cli.EXIT_ERROR
+    assert "bad HTTP response BadStatusLine('garbage')" in captured.err
+    assert captured.out == ""
+
+
+@pytest.mark.parametrize("value", ["inf", "nan", "1e300", "3601", "0", "-1", "ten"])
+def test_timeout_takes_a_finite_positive_number_of_seconds(
+    eml: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    value: str,
+) -> None:
+    def no_network(*_: object, **__: object) -> None:
+        raise AssertionError("a refused --timeout must not reach the network")
+
+    monkeypatch.setattr(keys, "urlopen", no_network)
+
+    with pytest.raises(SystemExit) as exit_:
+        cli.main([str(eml), "--timeout", value])
+
+    assert exit_.value.code == cli.EXIT_ERROR
+    assert "argument --timeout: must be more than 0" in capsys.readouterr().err
+
+
+def test_timeout_takes_fractions_and_the_maximum(
+    eml: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    deadlines: list[float] = []
+
+    def fake_urlopen(_: object, deadline: float) -> FakeResponse:
+        deadlines.append(deadline)
+        return FakeResponse(json.dumps(golden_jwks()).encode(), keys.DEFAULT_JWKS_URL)
+
+    monkeypatch.setattr(keys, "urlopen", fake_urlopen)
+    monkeypatch.setattr(keys, "time", SimpleNamespace(monotonic=lambda: 100.0))
+
+    for value in ("0.5", "3600"):
+        assert cli.main([str(eml), "--timeout", value]) == cli.EXIT_VERIFIED
+
+    assert deadlines == [100.5, 3700.0]

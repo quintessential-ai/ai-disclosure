@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import functools
+import http.client
 import importlib.metadata
 import math
+import socket
 import ssl
 import time
 import urllib.error
@@ -11,7 +14,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, Protocol, Self
+from typing import IO, TYPE_CHECKING, Any, Protocol, Self
 
 from ai_disclosure_verify.jws import keys_from_jwks, parse_json
 
@@ -19,16 +22,16 @@ if TYPE_CHECKING:
     from http.client import HTTPMessage
 
     from _typeshed import WriteableBuffer
-
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 # Where the published key set is served. The one place the address lives.
 DEFAULT_JWKS_URL = (
     "https://ai-disclosure.complexio.com/.well-known/ai-disclosure-jwks.json"
 )
-# The fetch after name resolution, redirects and reading included, must
-# finish within this.
+# Connecting, the TLS handshake, every read and every redirect of the fetch
+# end within this. Name resolution is not counted.
 FETCH_TIMEOUT_SECONDS = 10.0
+MAX_FETCH_TIMEOUT_SECONDS = 3600.0
 
 
 def _user_agent() -> str:
@@ -66,11 +69,19 @@ def fetch_jwks(
 ) -> dict[str, Ed25519PublicKey]:
     """Fetch the key set over HTTPS: one attempt, no retries, no caching.
 
-    Every redirect must stay on https, and the fetch must finish within
-    ``timeout`` seconds. Name resolution is left to the system resolver's
-    own timeout: only a thread could bound it, and that thread would outlive
-    the call.
+    Every redirect must stay on https. Connecting to each address, the TLS
+    handshake, every read and every redirect end within ``timeout`` seconds
+    of the call, which must be more than 0 and at most
+    ``MAX_FETCH_TIMEOUT_SECONDS``. Name resolution is left to the system
+    resolver's own timeout: only a thread could bound it, and that thread
+    would outlive the call.
     """
+    if not 0 < timeout <= MAX_FETCH_TIMEOUT_SECONDS:
+        msg = (
+            f"the timeout must be more than 0 and at most "
+            f"{MAX_FETCH_TIMEOUT_SECONDS:g} seconds, not {timeout!r}"
+        )
+        raise ValueError(msg)
     if not _is_https(url):
         msg = f"the key set address {url} is not https"
         raise KeyLoadError(msg)
@@ -97,7 +108,7 @@ def _is_https(url: str) -> bool:
 
 
 class _HttpsRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Follows a redirect only to another https address, and only before ``deadline``."""
+    """Follows a redirect only to another https address, before ``deadline``."""
 
     def __init__(self, deadline: float = math.inf) -> None:
         self._deadline = deadline
@@ -128,15 +139,59 @@ def _remaining(deadline: float) -> float:
     return remaining
 
 
-def _tls_context(deadline: float) -> ssl.SSLContext:
-    """The default TLS context, with every read on its sockets ending by ``deadline``.
+def _connect(
+    plain: type[socket.socket], deadline: float, address: tuple[str, int], *_: object
+) -> socket.socket:
+    """``socket.create_connection``, with every attempt ending by ``deadline``.
+
+    ``create_connection`` gives each address the whole timeout, so an
+    unreachable first address could use it up and the next start afresh.
+    """
+    host, port = address
+    errors: list[OSError] = []
+    for family, kind, proto, _name, sockaddr in socket.getaddrinfo(
+        host, port, type=socket.SOCK_STREAM
+    ):
+        timeout = _remaining(deadline)
+        sock = plain(family, kind, proto)
+        try:
+            sock.settimeout(timeout)
+            sock.connect(sockaddr)
+        except OSError as exc:
+            sock.close()
+            errors.append(exc)
+            continue
+        return sock
+    if errors:
+        raise errors[0]
+    msg = f"no address found for {host}"
+    raise OSError(msg)
+
+
+def _connection_class(deadline: float) -> type[http.client.HTTPSConnection]:
+    """An HTTPS connection whose connect, TLS handshake and reads end by ``deadline``.
 
     A per-read timeout alone lets a server that sends a byte at a time hold
-    the fetch open for ever; the status line and headers are read through
-    the same sockets, so they are bounded too.
+    the fetch open for ever. The plain socket also reads a proxy's answer to
+    CONNECT.
     """
 
-    class _Socket(ssl.SSLSocket):
+    class _Plain(socket.socket):
+        def recv(self, bufsize: int, flags: int = 0) -> bytes:
+            self.settimeout(_remaining(deadline))
+            return super().recv(bufsize, flags)
+
+        def recv_into(
+            self, buffer: WriteableBuffer, nbytes: int = 0, flags: int = 0
+        ) -> int:
+            self.settimeout(_remaining(deadline))
+            return super().recv_into(buffer, nbytes, flags)
+
+    class _Tls(ssl.SSLSocket):
+        def do_handshake(self, block: bool = False) -> None:
+            self.settimeout(_remaining(deadline))
+            super().do_handshake(block)
+
         def recv(self, buflen: int = 1024, flags: int = 0) -> bytes:
             self.settimeout(_remaining(deadline))
             return super().recv(buflen, flags)
@@ -148,8 +203,27 @@ def _tls_context(deadline: float) -> ssl.SSLContext:
             return super().recv_into(buffer, nbytes, flags)
 
     context = ssl.create_default_context()
-    context.sslsocket_class = _Socket
-    return context
+    context.sslsocket_class = _Tls
+
+    class _Connection(http.client.HTTPSConnection):
+        def __init__(self, host: str, **kwargs: Any) -> None:
+            kwargs["context"] = context
+            super().__init__(host, **kwargs)
+            # http.client's hook for making the socket, which connect() calls.
+            self._create_connection = functools.partial(_connect, _Plain, deadline)
+
+    return _Connection
+
+
+class _HttpsHandler(urllib.request.HTTPSHandler):
+    """Opens every connection, a redirect's included, to end by ``deadline``."""
+
+    def __init__(self, deadline: float) -> None:
+        super().__init__()
+        self._connection = _connection_class(deadline)
+
+    def https_open(self, req: urllib.request.Request) -> http.client.HTTPResponse:
+        return self.do_open(self._connection, req)
 
 
 class _Response(Protocol):
@@ -160,14 +234,13 @@ class _Response(Protocol):
 
 
 def urlopen(request: urllib.request.Request, deadline: float) -> _Response:
-    """Open ``request`` following https redirects only, by ``deadline``; tests replace this.
+    """Open ``request``, following https redirects only; tests replace this.
 
-    ``deadline`` is a ``time.monotonic`` value. Every read, and the TLS
-    handshake, ends by it.
+    ``deadline`` is a ``time.monotonic`` value. Connecting to each address,
+    the TLS handshake, every read and every redirect end by it.
     """
     opener = urllib.request.build_opener(
-        _HttpsRedirectHandler(deadline),
-        urllib.request.HTTPSHandler(context=_tls_context(deadline)),
+        _HttpsRedirectHandler(deadline), _HttpsHandler(deadline)
     )
     return opener.open(request, timeout=_remaining(deadline))
 
@@ -198,6 +271,10 @@ def _fetch_within(url: str, timeout: float) -> bytes:
             f"could not fetch the key set from {url} within {timeout:g}s: "
             f"{reason} ({_HINT})"
         )
+        raise KeyLoadError(msg) from exc
+    except http.client.HTTPException as exc:
+        msg = f"could not fetch the key set from {url}: bad HTTP response {exc!r}"
+        msg += f" ({_HINT})"
         raise KeyLoadError(msg) from exc
 
 

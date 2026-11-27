@@ -12,6 +12,18 @@ operates. Key ids are opaque on purpose. A `kid` is the key's RFC 7638 thumbprin
 customer, so the public set does not reveal whom we sign for. The signed token names the
 organisation (`on_behalf_of`).
 
+## Before the first key
+
+The set holds no key yet. Before the first key goes in, these must hold:
+
+- A signed mail sent through Microsoft Defender Safe Links still verifies on delivery.
+- How a key id relates to the organisation a token names (`on_behalf_of`) is settled. Today any
+  key in the set can sign for any organisation.
+- CI runs the detector tests and the key-set check on every pull request.
+
+A per-key validity window, checked against a token's `iat`, is a follow-up after 2 December
+2026. Until then a key has none (see "Rotating a key").
+
 ## Adding a deployment's key, before its first signed mail
 
 1. Generate an Ed25519 key for the deployment and store the private key as that deployment's

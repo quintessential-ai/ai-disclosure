@@ -691,8 +691,9 @@ The key set is published at
 <https://ai-disclosure.complexio.com/.well-known/ai-disclosure-jwks.json>, served
 as `application/jwk-set+json` and open to cross-origin reads. Its address does
 not change when keys are added or retired. A verifier follows a redirect only
-to another `https` address. It bounds the fetch with one deadline, not only
-each read, and a fetch that times out leaves nothing running; name
+to another `https` address. It bounds the fetch with one deadline:
+connecting to each address, the TLS handshake, every read and every
+redirect end by it, and a fetch that times out leaves nothing running. Name
 resolution is left to the system resolver's own timeout. The site refuses
 some HTTP libraries' default `User-Agent` (Python's `Python-urllib/3.x` gets
 HTTP 403), so a client names itself.
@@ -831,9 +832,9 @@ Exit status:
 
 By default the key set is fetched over HTTPS from the published location,
 only when a signed marker needs it; `--timeout` sets how long to wait for
-it, in seconds (default 10). `--jwks` reads it from a local file instead.
-With `--offline` and no `--jwks`, no key set is loaded, so signatures are
-reported as not checked.
+it, in seconds (default 10, at most 3600). `--jwks` reads it from a local
+file instead. With `--offline` and no `--jwks`, no key set is loaded, so
+signatures are reported as not checked.
 
 ### Reading the input
 

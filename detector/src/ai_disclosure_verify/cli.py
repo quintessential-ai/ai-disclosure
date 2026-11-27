@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -30,6 +31,7 @@ from ai_disclosure_verify.detect import Verdict, detect_file
 from ai_disclosure_verify.keys import (
     DEFAULT_JWKS_URL,
     FETCH_TIMEOUT_SECONDS,
+    MAX_FETCH_TIMEOUT_SECONDS,
     LazyKeys,
     fetch_jwks,
     load_jwks_file,
@@ -74,9 +76,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--timeout",
-        type=float,
+        type=_timeout,
         default=FETCH_TIMEOUT_SECONDS,
-        help="seconds to wait for the key set (default: %(default)s)",
+        help=(
+            "seconds to wait for the key set, at most "
+            f"{MAX_FETCH_TIMEOUT_SECONDS:g} (default: %(default)s)"
+        ),
     )
     parser.add_argument("--json", action="store_true", help="print the report as JSON")
     args = parser.parse_args(argv)
@@ -90,6 +95,18 @@ def main(argv: list[str] | None = None) -> int:
     except RecursionError:
         sys.stderr.write("error: the input is nested too deeply to read\n")
         return EXIT_ERROR
+
+
+def _timeout(text: str) -> float:
+    try:
+        seconds = float(text)
+    except ValueError:
+        seconds = math.nan
+    if not 0 < seconds <= MAX_FETCH_TIMEOUT_SECONDS:
+        msg = f"must be more than 0 and at most {MAX_FETCH_TIMEOUT_SECONDS:g}"
+        msg += f", not {text}"
+        raise argparse.ArgumentTypeError(msg)
+    return seconds
 
 
 def _verify(
