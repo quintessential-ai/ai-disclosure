@@ -16,7 +16,7 @@
     {
       "name": "whitespace_a",
       "html": "<div>Pay  USD 1.00\n<b>now</b>&nbsp;please</div>",
-      "balanced": "<div>Pay  USD 1.00\n<b>now</b> please</div>",
+      "balanced": "<div>Pay  USD 1.00\n<b>now</b>\u00a0please</div>",
       "canonical": "PayUSD1.00nowplease",
       "content_sha256": "Yi-zzEtjy_n6gJKxcCRVeLmwEtaFlYwuI954skGGvLw",
       "first_violation": null
@@ -103,8 +103,8 @@
     },
     {
       "name": "control_characters",
-      "html": "<p>A\u0000B\u0007CD</p>",
-      "balanced": "<p>AB\u0007CD</p>",
+      "html": "<p>A\u0000B\u0007C\u007fD</p>",
+      "balanced": "<p>AB\u0007C\u007fD</p>",
       "canonical": "ABCD",
       "content_sha256": "4S4RWs9FUrJWi1XpPL05OUxO-ByCRH-vyZeIKgLSNnc",
       "first_violation": null
@@ -119,8 +119,8 @@
     },
     {
       "name": "url_control_percent_encoded",
-      "html": "<a href=\"https://x.test/a\u0007bc\u001f\">x</a>",
-      "balanced": "<a href=\"https://x.test/a\u0007bc\u001f\">x</a>",
+      "html": "<a href=\"https://x.test/a\u0007b\u007fc\u001f\">x</a>",
+      "balanced": "<a href=\"https://x.test/a\u0007b\u007fc\u001f\">x</a>",
       "canonical": "\u001ehttps://x.test/a%07b%7Fc\u001fx",
       "content_sha256": "Z4PauU2RYgQkA1gBpJ-Fw6bdkCIV6PfIuKxxnXpEO6I",
       "first_violation": null
@@ -199,9 +199,9 @@
     },
     {
       "name": "link_title_and_image_alt",
-      "html": "<p>See <a href=\"https://x.test/a\" title=\"Clause 4 (b)\">the clause</a> <img src=\"https://x.test/c.png\" alt=\"Chart: Q3 é\"> now</p>",
-      "balanced": "<p>See <a href=\"https://x.test/a\" title=\"Clause 4 (b)\">the clause</a> <img src=\"https://x.test/c.png\" alt=\"Chart: Q3 é\"> now</p>",
-      "canonical": "See\u001ehttps://x.test/a\u001f\u001dClause4(b)\u001ftheclause\u001ehttps://x.test/c.png\u001f\u001dChart:Q3é\u001fnow",
+      "html": "<p>See <a href=\"https://x.test/a\" title=\"Clause 4 (b)\">the clause</a> <img src=\"https://x.test/c.png\" alt=\"Chart: Q3 \u00e9\"> now</p>",
+      "balanced": "<p>See <a href=\"https://x.test/a\" title=\"Clause 4 (b)\">the clause</a> <img src=\"https://x.test/c.png\" alt=\"Chart: Q3 \u00e9\"> now</p>",
+      "canonical": "See\u001ehttps://x.test/a\u001f\u001dClause4(b)\u001ftheclause\u001ehttps://x.test/c.png\u001f\u001dChart:Q3\u00e9\u001fnow",
       "content_sha256": "4qns4S5n6OELtiqoK4soSoA7FGUdsnV5J_FGfBDkUs0",
       "first_violation": null
     },
@@ -223,16 +223,16 @@
     },
     {
       "name": "alt_normalised_like_text",
-      "html": "<img src=\"https://x.test/c.png\" alt=\"Café   a\u0007b\n\">",
-      "balanced": "<img src=\"https://x.test/c.png\" alt=\"Café   a\u0007b\n\">",
-      "canonical": "\u001ehttps://x.test/c.png\u001f\u001dCaféab\u001f",
+      "html": "<img src=\"https://x.test/c.png\" alt=\"Caf\u00e9 \u00a0 a\u0007b\n\">",
+      "balanced": "<img src=\"https://x.test/c.png\" alt=\"Caf\u00e9 \u00a0 a\u0007b\n\">",
+      "canonical": "\u001ehttps://x.test/c.png\u001f\u001dCaf\u00e9ab\u001f",
       "content_sha256": "49xpNYJZ8MjQgvtx9C5Kf6-8Q6-auHNmATYPH_haVYI",
       "first_violation": null
     },
     {
       "name": "alt_empty_after_normalisation_does_not_split_the_run",
-      "html": "<p>a<img src=\"https://x.test/c.png\" alt=\"  \t \"> b<a href=\"https://x.test/\" title=\"\">c</a></p>",
-      "balanced": "<p>a<img src=\"https://x.test/c.png\" alt=\"  \t \"> b<a href=\"https://x.test/\" title=\"\">c</a></p>",
+      "html": "<p>a<img src=\"https://x.test/c.png\" alt=\" \u00a0\t \"> b<a href=\"https://x.test/\" title=\"\">c</a></p>",
+      "balanced": "<p>a<img src=\"https://x.test/c.png\" alt=\" \u00a0\t \"> b<a href=\"https://x.test/\" title=\"\">c</a></p>",
       "canonical": "a\u001ehttps://x.test/c.png\u001fb\u001ehttps://x.test/\u001fc",
       "content_sha256": "WLBz00nwhrSGnUK8IeaJyYqnSHFWbctrmol8fUSWvnI",
       "first_violation": null
@@ -456,23 +456,23 @@
     {
       "name": "character_references",
       "html": "<p>a&amp;b &lt;c&gt; &#x41; &eacute; &nbsp;d</p>",
-      "balanced": "<p>a&amp;b &lt;c&gt; A é  d</p>",
-      "canonical": "a&b<c>Aéd",
+      "balanced": "<p>a&amp;b &lt;c&gt; A \u00e9 \u00a0d</p>",
+      "canonical": "a&b<c>A\u00e9d",
       "content_sha256": "AemvcKU2JihvQ2AlwvopcKz_Evm4TWpLWDc6xLlo-zs",
       "first_violation": null
     },
     {
       "name": "nfc_normalisation",
-      "html": "<p>Café Café</p>",
-      "balanced": "<p>Café Café</p>",
-      "canonical": "CaféCafé",
+      "html": "<p>Cafe\u0301 Caf\u00e9</p>",
+      "balanced": "<p>Cafe\u0301 Caf\u00e9</p>",
+      "canonical": "Caf\u00e9Caf\u00e9",
       "content_sha256": "qzEQAIjdtLFGRMhamWWRtKxqOdjINlGFiimluZciOy4",
       "first_violation": null
     },
     {
       "name": "whitespace_set",
-      "html": "<p>a b c　d﻿ef g⁠h</p>",
-      "balanced": "<p>a b c　d﻿ef g⁠h</p>",
+      "html": "<p>a\u00a0b\u2003c\u3000d\ufeffe\u0085f\u1680g\u2060h</p>",
+      "balanced": "<p>a\u00a0b\u2003c\u3000d\ufeffe\u0085f\u1680g\u2060h</p>",
       "canonical": "abcdefgh",
       "content_sha256": "nFbMUbN0w7oYkhDVttS_V3kNNRyWxHwCGQ7PHkMGNas",
       "first_violation": null
@@ -520,16 +520,16 @@
     {
       "name": "unicode_and_entity_escaping",
       "input": {
-        "text": "Café — “quoted” text\r\nline two",
+        "text": "Caf\u00e9 \u2014 \u201cquoted\u201d\u00a0text\r\nline two",
         "entity": "Smith & \"Sons\" <Ltd>",
         "mid": "ffffffffffffffffffffffffffffffff",
         "iat": 1794238108
       },
       "expected": {
-        "canonical": "Café—“quoted”textlinetwoThisemailwasgeneratedbyanAIsystem(ComplexioEnterpriseAutomator)onbehalfofSmith&\"Sons\"<Ltd>.Pleaseverifybeforetakingaction.",
+        "canonical": "Caf\u00e9\u2014\u201cquoted\u201dtextlinetwoThisemailwasgeneratedbyanAIsystem(ComplexioEnterpriseAutomator)onbehalfofSmith&\"Sons\"<Ltd>.Pleaseverifybeforetakingaction.",
         "content_sha256": "R-vyW5zxcurrGl0KjYV5hWXj8yyiN2khftVT8EwNWcE",
         "token": "eyJhbGciOiJub25lIiwidHlwIjoiYWktZGlzY2xvc3VyZStqd3QifQ.eyJhaV9nZW5lcmF0ZWQiOnRydWUsImNhbm9uIjoidGV4dC1saW5rcy8yIiwiY29udGVudF9zaGEyNTYiOiJSLXZ5VzV6eGN1cnJHbDBLallWNWhXWGo4eXlpTjJraGZ0VlQ4RXdOV2NFIiwiZ2VuZXJhdG9yIjoiQ29tcGxleGlvIEVudGVycHJpc2UgQXV0b21hdG9yIiwiaWF0IjoxNzk0MjM4MTA4LCJtaWQiOiJmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZiIsIm9uX2JlaGFsZl9vZiI6IlNtaXRoICYgXCJTb25zXCIgPEx0ZD4iLCJzcGVjIjoiY29tcGxleGlvLWFpLWRpc2Nsb3N1cmUvMSJ9.",
-        "html_body": "<div data-ai-content=\"ffffffffffffffffffffffffffffffff\"><div>Café — “quoted” text<br>line two</div><p><small><em>This email was generated by an AI system (Complexio Enterprise Automator) on behalf of Smith &amp; \"Sons\" &lt;Ltd&gt;. Please verify before taking action.</em></small></p></div><div data-ai-disclosure=\"eyJhbGciOiJub25lIiwidHlwIjoiYWktZGlzY2xvc3VyZStqd3QifQ.eyJhaV9nZW5lcmF0ZWQiOnRydWUsImNhbm9uIjoidGV4dC1saW5rcy8yIiwiY29udGVudF9zaGEyNTYiOiJSLXZ5VzV6eGN1cnJHbDBLallWNWhXWGo4eXlpTjJraGZ0VlQ4RXdOV2NFIiwiZ2VuZXJhdG9yIjoiQ29tcGxleGlvIEVudGVycHJpc2UgQXV0b21hdG9yIiwiaWF0IjoxNzk0MjM4MTA4LCJtaWQiOiJmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZiIsIm9uX2JlaGFsZl9vZiI6IlNtaXRoICYgXCJTb25zXCIgPEx0ZD4iLCJzcGVjIjoiY29tcGxleGlvLWFpLWRpc2Nsb3N1cmUvMSJ9.\" style=\"display:none\" aria-hidden=\"true\"></div>"
+        "html_body": "<div data-ai-content=\"ffffffffffffffffffffffffffffffff\"><div>Caf\u00e9 \u2014 \u201cquoted\u201d\u00a0text<br>line two</div><p><small><em>This email was generated by an AI system (Complexio Enterprise Automator) on behalf of Smith &amp; \"Sons\" &lt;Ltd&gt;. Please verify before taking action.</em></small></p></div><div data-ai-disclosure=\"eyJhbGciOiJub25lIiwidHlwIjoiYWktZGlzY2xvc3VyZStqd3QifQ.eyJhaV9nZW5lcmF0ZWQiOnRydWUsImNhbm9uIjoidGV4dC1saW5rcy8yIiwiY29udGVudF9zaGEyNTYiOiJSLXZ5VzV6eGN1cnJHbDBLallWNWhXWGo4eXlpTjJraGZ0VlQ4RXdOV2NFIiwiZ2VuZXJhdG9yIjoiQ29tcGxleGlvIEVudGVycHJpc2UgQXV0b21hdG9yIiwiaWF0IjoxNzk0MjM4MTA4LCJtaWQiOiJmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZiIsIm9uX2JlaGFsZl9vZiI6IlNtaXRoICYgXCJTb25zXCIgPEx0ZD4iLCJzcGVjIjoiY29tcGxleGlvLWFpLWRpc2Nsb3N1cmUvMSJ9.\" style=\"display:none\" aria-hidden=\"true\"></div>"
       }
     },
     {
@@ -1759,6 +1759,134 @@
             "signature": "valid",
             "content": "match",
             "rejected": false,
+            "legacy": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "empty_header_token",
+      "input": {
+        "jwks": true,
+        "header_token": "",
+        "x_ai_generated": null,
+        "html_body": "<p>Hello.</p>"
+      },
+      "expected": {
+        "verdict": "ai_marked_unverified",
+        "unmarked_content": false,
+        "first_violation": null,
+        "findings": [
+          {
+            "carrier": "header",
+            "placement": "original",
+            "signature": "invalid",
+            "content": "content_not_found",
+            "rejected": true,
+            "legacy": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "empty_body_attribute",
+      "input": {
+        "jwks": true,
+        "header_token": null,
+        "x_ai_generated": null,
+        "html_body": "<div data-ai-content=\"fedcba9876543210fedcba9876543210\"><p>Pay <b>USD 1.00</b> by <a href=\"https://x.test/t\">Friday</a>.</p><p><small><em>This email was generated by an AI system (Complexio Enterprise Automator) on behalf of the company. Please verify before taking action.</em></small></p></div><div data-ai-disclosure=\"\" style=\"display:none\" aria-hidden=\"true\"></div>"
+      },
+      "expected": {
+        "verdict": "ai_marked_unverified",
+        "unmarked_content": false,
+        "first_violation": "outside:div[data-ai-disclosure]",
+        "findings": [
+          {
+            "carrier": "body",
+            "placement": "unknown",
+            "signature": "invalid",
+            "content": "content_not_found",
+            "rejected": true,
+            "legacy": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "forged_hidden_block_beside_a_verifying_header",
+      "input": {
+        "jwks": true,
+        "header_token": "eyJhbGciOiJFZERTQSIsImtpZCI6ImdvbGRlbi12ZWN0b3JzIiwidHlwIjoiYWktZGlzY2xvc3VyZStqd3QifQ.eyJhaV9nZW5lcmF0ZWQiOnRydWUsImNhbm9uIjoidGV4dC1saW5rcy8yIiwiY29udGVudF9zaGEyNTYiOiJ4S1VmRE1oUGd6WVUyWTRCV3BLcnV5Tk1ERmxWdGVoTlhGWU9VMzlqRGtJIiwiZ2VuZXJhdG9yIjoiQ29tcGxleGlvIEVudGVycHJpc2UgQXV0b21hdG9yIiwiaWF0IjoxNzk0MjM4MzAwLCJtaWQiOiJmZWRjYmE5ODc2NTQzMjEwZmVkY2JhOTg3NjU0MzIxMCIsIm9uX2JlaGFsZl9vZiI6InRoZSBjb21wYW55Iiwic3BlYyI6ImNvbXBsZXhpby1haS1kaXNjbG9zdXJlLzEifQ.ps6gj2pTOvYs0_9wDHiwUBzYuioqOD-U_dScxUxF2KlkRoJWnJUdLSHrs-94MgwuD30zp31IZb_d0VbQgy6IDw",
+        "x_ai_generated": null,
+        "html_body": "<div data-ai-content=\"fedcba9876543210fedcba9876543210\"><p>Pay <b>USD 1.00</b> by <a href=\"https://x.test/t\">Friday</a>.</p><p><small><em>This email was generated by an AI system (Complexio Enterprise Automator) on behalf of the company. Please verify before taking action.</em></small></p></div><div data-ai-disclosure=\"eyJhbGciOiJFZERTQSIsImtpZCI6ImdvbGRlbi12ZWN0b3JzIiwidHlwIjoiYWktZGlzY2xvc3VyZStqd3QifQ.eyJhaV9nZW5lcmF0ZWQiOnRydWUsImNhbm9uIjoidGV4dC1saW5rcy8yIiwiY29udGVudF9zaGEyNTYiOiJ4S1VmRE1oUGd6WVUyWTRCV3BLcnV5Tk1ERmxWdGVoTlhGWU9VMzlqRGtJIiwiZ2VuZXJhdG9yIjoiQ29tcGxleGlvIEVudGVycHJpc2UgQXV0b21hdG9yIiwiaWF0IjoxNzk0MjM4MzAwLCJtaWQiOiJmZWRjYmE5ODc2NTQzMjEwZmVkY2JhOTg3NjU0MzIxMCIsIm9uX2JlaGFsZl9vZiI6InRoZSBjb21wYW55Iiwic3BlYyI6ImNvbXBsZXhpby1haS1kaXNjbG9zdXJlLzEifQ.p86gj2pTOvYs0_9wDHiwUBzYuioqOD-U_dScxUxF2KlkRoJWnJUdLSHrs-94MgwuD30zp31IZb_d0VbQgy6IDw\" style=\"display:none\" aria-hidden=\"true\"></div>"
+      },
+      "expected": {
+        "verdict": "verified_with_unmarked_content",
+        "unmarked_content": true,
+        "first_violation": null,
+        "findings": [
+          {
+            "carrier": "header",
+            "placement": "original",
+            "signature": "valid",
+            "content": "match",
+            "rejected": false,
+            "legacy": false
+          },
+          {
+            "carrier": "body",
+            "placement": "original",
+            "signature": "invalid",
+            "content": "match",
+            "rejected": false,
+            "legacy": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "token_json_nested_32_deep",
+      "input": {
+        "jwks": true,
+        "header_token": null,
+        "x_ai_generated": null,
+        "html_body": "<div data-ai-content=\"fedcba9876543210fedcba9876543210\"><p>Pay <b>USD 1.00</b> by <a href=\"https://x.test/t\">Friday</a>.</p><p><small><em>This email was generated by an AI system (Complexio Enterprise Automator) on behalf of the company. Please verify before taking action.</em></small></p></div><div data-ai-disclosure=\"eyJhbGciOiJFZERTQSIsImtpZCI6ImdvbGRlbi12ZWN0b3JzIiwidHlwIjoiYWktZGlzY2xvc3VyZStqd3QifQ.eyJhaV9nZW5lcmF0ZWQiOnRydWUsImNhbm9uIjoidGV4dC1saW5rcy8yIiwiY29udGVudF9zaGEyNTYiOiJ4S1VmRE1oUGd6WVUyWTRCV3BLcnV5Tk1ERmxWdGVoTlhGWU9VMzlqRGtJIiwiZ2VuZXJhdG9yIjoiQ29tcGxleGlvIEVudGVycHJpc2UgQXV0b21hdG9yIiwiaWF0IjoxNzk0MjM4MzAwLCJtaWQiOiJmZWRjYmE5ODc2NTQzMjEwZmVkY2JhOTg3NjU0MzIxMCIsIm9uX2JlaGFsZl9vZiI6InRoZSBjb21wYW55Iiwic3BlYyI6ImNvbXBsZXhpby1haS1kaXNjbG9zdXJlLzEiLCJuIjpbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXX0.uIbTcIpoj9UaraZHdcCC_geN3NaHP2fc5XruS4MwkBd_4-RCjSHnct9-cCCL_85IKDDF4TBR91KGkJ2qPxG2Bw\" style=\"display:none\" aria-hidden=\"true\"></div>"
+      },
+      "expected": {
+        "verdict": "verified",
+        "unmarked_content": false,
+        "first_violation": null,
+        "findings": [
+          {
+            "carrier": "body",
+            "placement": "original",
+            "signature": "valid",
+            "content": "match",
+            "rejected": false,
+            "legacy": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "token_json_nested_33_deep",
+      "input": {
+        "jwks": true,
+        "header_token": null,
+        "x_ai_generated": null,
+        "html_body": "<div data-ai-content=\"fedcba9876543210fedcba9876543210\"><p>Pay <b>USD 1.00</b> by <a href=\"https://x.test/t\">Friday</a>.</p><p><small><em>This email was generated by an AI system (Complexio Enterprise Automator) on behalf of the company. Please verify before taking action.</em></small></p></div><div data-ai-disclosure=\"eyJhbGciOiJFZERTQSIsImtpZCI6ImdvbGRlbi12ZWN0b3JzIiwidHlwIjoiYWktZGlzY2xvc3VyZStqd3QifQ.eyJhaV9nZW5lcmF0ZWQiOnRydWUsImNhbm9uIjoidGV4dC1saW5rcy8yIiwiY29udGVudF9zaGEyNTYiOiJ4S1VmRE1oUGd6WVUyWTRCV3BLcnV5Tk1ERmxWdGVoTlhGWU9VMzlqRGtJIiwiZ2VuZXJhdG9yIjoiQ29tcGxleGlvIEVudGVycHJpc2UgQXV0b21hdG9yIiwiaWF0IjoxNzk0MjM4MzAwLCJtaWQiOiJmZWRjYmE5ODc2NTQzMjEwZmVkY2JhOTg3NjU0MzIxMCIsIm9uX2JlaGFsZl9vZiI6InRoZSBjb21wYW55Iiwic3BlYyI6ImNvbXBsZXhpby1haS1kaXNjbG9zdXJlLzEiLCJuIjpbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW11dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dfQ.pwRbsBiR0orTcGxVGihkweXbM8XPfGRKabuFFFnreSDel3mbaRzduJh7F9-2St9bDRmij_NGSJEohq9orTUhAA\" style=\"display:none\" aria-hidden=\"true\"></div>"
+      },
+      "expected": {
+        "verdict": "ai_marked_unverified",
+        "unmarked_content": false,
+        "first_violation": "outside:div[data-ai-disclosure]",
+        "findings": [
+          {
+            "carrier": "body",
+            "placement": "unknown",
+            "signature": "invalid",
+            "content": "content_not_found",
+            "rejected": true,
             "legacy": false
           }
         ]

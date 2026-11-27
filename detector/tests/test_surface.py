@@ -16,7 +16,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from helpers import GOLDEN_KID, ROOT, golden_public_key, signed_vector_body
+from helpers import (
+    GOLDEN_KID,
+    ROOT,
+    golden_public_key,
+    golden_token,
+    signed_vector_body,
+    signed_vector_claims,
+)
 
 from ai_disclosure_verify import (
     Carrier,
@@ -28,7 +35,13 @@ from ai_disclosure_verify import (
     Verdict,
     cli,
 )
-from ai_disclosure_verify.canonical import MAX_DOCUMENT_BYTES
+from ai_disclosure_verify.canonical import (
+    CANONICALISATION,
+    MAX_DOCUMENT_BYTES,
+    canonical_as,
+    digest_of_canonical,
+    scan_html,
+)
 from ai_disclosure_verify.detect import (
     VERDICT_MEANING,
     ContentCheck,
@@ -611,3 +624,74 @@ def test_a_legacy_marker_with_a_huge_number_reads_as_malformed() -> None:
     assert finding.error is not None
     assert finding.error.startswith("malformed legacy marker")
     assert report.verdict is Verdict.UNVERIFIED
+
+
+def test_a_legacy_marker_nested_past_the_json_cap_reads_as_malformed() -> None:
+    value = '{"ai_generated": true, "n": ' + "[" * 50_000 + "]" * 50_000 + "}"
+    body = (
+        f"<div data-ai-disclosure='{value}' "
+        'style="display:none" aria-hidden="true"></div>'
+    )
+
+    (finding,) = detect_html(body).findings
+
+    assert finding.legacy
+    assert finding.error == "malformed legacy marker: JSON nested more than 32 deep"
+
+
+@pytest.mark.parametrize(
+    "charset",
+    ['"ut\x00f"', "idna"],
+    ids=["nul-in-name", "codec-that-cannot-decode"],
+)
+def test_a_charset_the_codecs_refuse_fails_closed(charset: str) -> None:
+    raw = (
+        "Subject: x\r\nMIME-Version: 1.0\r\n"
+        f"Content-Type: text/html; charset={charset}\r\n\r\n<p>{'a' * 70}</p>\r\n"
+    ).encode()
+
+    with pytest.raises(MessageDecodeError, match="cannot decode"):
+        detect_message(raw)
+
+
+def test_the_command_escapes_input_quoted_in_an_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    eml = (
+        b"Subject: x\r\nMIME-Version: 1.0\r\n"
+        b'Content-Type: text/html; charset="x\x1b[31mred"\r\n\r\n<p>x</p>\r\n'
+    )
+
+    assert _run(tmp_path, eml) == cli.EXIT_ERROR
+    err = capsys.readouterr().err
+    assert "\x1b" not in err
+    assert "\\x1b[31mred" in err
+
+
+def test_a_lone_surrogate_is_hashed_as_the_replacement_character() -> None:
+    assert digest_of_canonical("a\ud800b") == digest_of_canonical("a�b")
+    # A surrogate pair is the character it encodes, as in JavaScript.
+    assert digest_of_canonical("😀") == digest_of_canonical("\U0001f600")
+    # A URL holding one is kept as written (text-links/2) and hashed the same way.
+    assert digest_of_canonical("https://x.test/\ud800") == digest_of_canonical(
+        "https://x.test/�"
+    )
+
+
+def test_content_with_a_lone_surrogate_verifies() -> None:
+    mid = "0" * 31 + "7"
+    content = f'<div data-ai-content="{mid}"><p>Rates \ud800 up</p></div>'
+    canonical = canonical_as(
+        scan_html(content).regions[mid].canonical, CANONICALISATION
+    )
+    vector = {
+        "input": {"mid": mid},
+        "expected": {"content_sha256": digest_of_canonical(canonical)},
+    }
+    token = golden_token(signed_vector_claims(vector))
+    marker = (
+        f'<div data-ai-disclosure="{token}" style="display:none" '
+        'aria-hidden="true"></div>'
+    )
+
+    assert detect_html(content + marker, KEYS).verdict is Verdict.VERIFIED

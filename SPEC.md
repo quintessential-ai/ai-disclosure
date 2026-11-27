@@ -461,7 +461,8 @@ same as the `%20` form a mail server sends on.
    whitespace.
 4. Concatenate the runs and items in order.
 5. `content_sha256` is the SHA-256 of the UTF-8 encoding, in unpadded
-   base64url.
+   base64url. A lone surrogate code point is replaced with U+FFFD before
+   UTF-8 encoding, as the WHATWG Encoding Standard does.
 
 The content's string is built from the walk of the content container's
 subtree only.
@@ -638,7 +639,9 @@ digest; changing any part's content (text, numbers, styles, images) breaks it.
 The marker is written as an incremental update, after the file as generated.
 `content_sha256` is the unpadded base64url SHA-256 of the file's bytes up to
 and including the last `%%EOF` before that update. A verifier finds the token
-in the raw bytes and digests up to the last `%%EOF` that precedes it.
+in the raw bytes and digests up to the last `%%EOF` that precedes it. The
+Info entry is a PDF literal string: its escapes are decoded first, as a
+writer may write any byte as one (`.` as `\056`).
 
 Any change to the generated revision breaks the digest. A later incremental
 update appended after the marker does not, and is not covered by it. A tool
@@ -649,8 +652,10 @@ detector does not look for it.
 ### Verifying a file
 
 Steps 2 and 3 of [Verifying a message](#verifying-a-message) apply
-unchanged. For step 4, recompute the digest for the token's `canon`; a token
-whose `canon` does not belong to the file type is unsupported. The verdict is
+unchanged: an `AIDisclosure` property or PDF entry that is empty, or holds
+anything but a token, is a malformed token, never `no_marker`. For step 4,
+recompute the digest for the token's `canon`; a token whose `canon` does not
+belong to the file type is unsupported. The verdict is
 `verified` when the signature is valid and the digest matches, and
 `ai_marked_unverified` otherwise. PDF verification always reports
 `verified_with_unmarked_content` instead of `verified` when the revision's
@@ -795,8 +800,10 @@ unsupported canonicalisation, a forged signature, an unknown key,
 `alg: none` with or without a signature, `HS256` keyed with the public key,
 `Ed25519` as `alg`, `crit`, `b64`, `jku`, a `kid` that is not a string, a
 repeated header member or claim, `NaN`, a non-canonical signature spelling,
-each claim rule, unparseable tokens, an earlier-format marker, an
-`X-AI-Generated` header alone, and HTML nested too deep.
+each claim rule, unparseable tokens, an empty header or attribute, a forged
+hidden block beside a verifying header, token JSON nested 32 deep (read) and
+33 deep (rejected), an earlier-format marker, an `X-AI-Generated` header
+alone, and HTML nested too deep.
 
 ## Reference implementation
 
@@ -853,13 +860,14 @@ this order:
 5. Anything else is a message.
 
 A fragment whose first line looks like a header field (`Note: …`) is read
-as a message first. When that message has no HTML body and no marker, and
-the input holds a tag, the input is read again as an HTML body, and that
-reading is reported if it finds a marker, or if it is `unparseable` and the
-input holds `data-ai-disclosure`. So the guess never turns a marked
-fragment into `no_marker`; the fragment's first line is text before its
-container, so its marker reads as quoted. A message whose MIME
-parts nest too deeply for the parser is reported as unreadable (exit status
+as a message first. When that message has no HTML body and no marker, the
+input is read again: as a PDF or Office file when its first 1024 bytes hold
+that signature (step 3), reported if it finds a marker; failing that, as an
+HTML body when it holds a tag, reported if it finds a marker, or if it is
+`unparseable` and the input holds `data-ai-disclosure`. So the guess never
+turns a marked file or fragment into `no_marker`; the fragment's first line
+is text before its container, so its marker reads as quoted. A message whose
+MIME parts nest too deeply for the parser is reported as unreadable (exit status
 2), as an HTML body over the caps in [Parsing](#parsing) is `unparseable`.
 An Office file whose routing XML nests too deeply to serialise keeps its
 marker, with its content not found (exit status 3). None of these reads as

@@ -40,22 +40,37 @@ _NS_CUSTOM = "http://schemas.openxmlformats.org/officeDocument/2006/custom-prope
 _NS_CT = "http://schemas.openxmlformats.org/package/2006/content-types"
 _REL_CUSTOM = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/custom-properties"
 # Caps on an Office package, checked on the sizes it declares before any part
-# is read. Normal Office files stay far below both. Parts are hashed as they
-# are inflated, so the size cap bounds the time a digest takes, not memory.
+# is read. Parts are hashed as they are inflated, so the size cap bounds the
+# time a digest takes, not memory.
 MAX_PACKAGE_PARTS = 10_000
 MAX_PACKAGE_BYTES = 512 * 1024 * 1024
-# The routing and custom-properties parts are parsed whole. Routing for
-# 10,000 parts takes about 2 MB.
+# The routing and custom-properties parts are parsed whole.
 MAX_XML_PART_BYTES = 4 * 1024 * 1024
 # OPC packages use only these; zipfile does not bound every other method's output.
 _PACKAGE_COMPRESSION = frozenset({zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED})
 _READ_CHUNK = 64 * 1024
 _EOF = b"%%EOF"
-_TOKEN = rb"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*"
+# Any value, so an empty or malformed one is found and read as a malformed
+# token. Each match stops at the next unescaped parenthesis or tag, which
+# every later occurrence starts with, so a file full of them is scanned once.
 _PDF_TOKEN = re.compile(
-    rb"/" + FILE_PROPERTY.encode() + rb"\s*\((" + _TOKEN + rb")\)"
-    rb"|<cpxai:" + FILE_PROPERTY.encode() + rb">(" + _TOKEN + rb")<"
+    rb"/" + FILE_PROPERTY.encode() + rb"\s*\(((?:[^()\\]|\\.)*)\)"
+    rb"|<cpxai:" + FILE_PROPERTY.encode() + rb">([^<]*)<",
+    re.DOTALL,
 )
+# A PDF literal string escape: a named character, up to three octal digits,
+# or a backslash before a line break, which continues the string.
+_PDF_ESCAPE = re.compile(rb"\\([0-7]{1,3}|\r\n|.)", re.DOTALL)
+_PDF_NAMED_ESCAPES = {
+    b"n": b"\n",
+    b"r": b"\r",
+    b"t": b"\t",
+    b"b": b"\b",
+    b"f": b"\f",
+    b"\r\n": b"",
+    b"\r": b"",
+    b"\n": b"",
+}
 
 
 def is_ooxml(data: bytes) -> bool:
@@ -228,7 +243,8 @@ def pdf_digest(revision: bytes) -> str:
 def ooxml_token(data: bytes) -> str | None:
     """The token in the package's ``AIDisclosure`` custom property, if any.
 
-    Reads only the package relationships and the custom-properties part.
+    Reads only the package relationships and the custom-properties part. A
+    property without a value gives ``""``: it is still an attempt at a marker.
     """
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         infos = _package_infos(zf)
@@ -241,8 +257,8 @@ def ooxml_token(data: bytes) -> str | None:
         msg = "custom-properties part is not metadata"
         raise ValueError(msg)
     for prop in props.iterfind(f"{{{_NS_CUSTOM}}}property"):
-        if prop.get("name") == FILE_PROPERTY and len(prop) and prop[0].text:
-            return prop[0].text.strip()
+        if prop.get("name") == FILE_PROPERTY:
+            return (prop[0].text or "").strip() if len(prop) else ""
     return None
 
 
@@ -255,6 +271,24 @@ def pdf_token(data: bytes) -> tuple[str, bytes] | None:
     match = _PDF_TOKEN.search(data)
     if match is None:
         return None
-    token = match.group(1) or match.group(2)
+    literal = match.group(1)
+    # A writer may escape any byte of an Info string, pypdf the dots as \056.
+    token = _pdf_literal(literal) if literal is not None else match.group(2)
     end = data.rfind(_EOF, 0, match.start())
-    return token.decode("ascii"), data[: end + len(_EOF)] if end >= 0 else b""
+    # A byte outside ASCII cannot be in a token; replaced, it reads as malformed.
+    return (
+        token.decode("ascii", errors="replace"),
+        data[: end + len(_EOF)] if end >= 0 else b"",
+    )
+
+
+def _pdf_literal(raw: bytes) -> bytes:
+    """The bytes a PDF literal string's body stands for (ISO 32000-1, 7.3.4.2)."""
+
+    def unescape(match: re.Match[bytes]) -> bytes:
+        escaped = match.group(1)
+        if escaped[0] in b"01234567":
+            return bytes([int(escaped, 8) & 0xFF])
+        return _PDF_NAMED_ESCAPES.get(escaped, escaped)
+
+    return _PDF_ESCAPE.sub(unescape, raw)

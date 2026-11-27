@@ -27,7 +27,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ai_disclosure_verify.detect import Verdict, detect_file
+from ai_disclosure_verify.detect import Verdict, _escaped, detect_file
 from ai_disclosure_verify.keys import (
     DEFAULT_JWKS_URL,
     FETCH_TIMEOUT_SECONDS,
@@ -89,8 +89,9 @@ def main(argv: list[str] | None = None) -> int:
         return _verify(args.file, args.jwks, args.timeout, args.offline, args.json)
     except (OSError, ValueError, LookupError) as exc:
         # Exit 1 means "read the message, found no marker"; a failure to read
-        # must not look like that.
-        sys.stderr.write(f"error: {exc}\n")
+        # must not look like that. The text can quote the input (a charset
+        # name, an XML entity), so it is escaped like any value from it.
+        sys.stderr.write(f"error: {_escaped(str(exc))}\n")
         return EXIT_ERROR
     except RecursionError:
         sys.stderr.write("error: the input is nested too deeply to read\n")
@@ -135,6 +136,6 @@ def _verify(
     if report.verdict is Verdict.NONE:
         return EXIT_NO_MARKER
     if report.verdict is Verdict.UNPARSEABLE:
-        sys.stderr.write(f"error: {report.unparseable}\n")
+        sys.stderr.write(f"error: {_escaped(report.unparseable or '')}\n")
         return EXIT_ERROR
     return EXIT_UNVERIFIED

@@ -105,25 +105,11 @@ class ContentCheck(StrEnum):
 class Verdict(StrEnum):
     """The message-level answer."""
 
-    # The message's own marker verifies, its container holds only allowlisted
-    # markup, and outside it there is nothing but empty scaffolding and the
-    # marker block. In an email, no other part a reader may see is present,
-    # apart from a plain-text alternative to the HTML body, which is not
-    # checked.
+    # The specification's verdict table defines each value.
     VERIFIED = "verified"
-    # The message's own marker verifies, but the message carries markup
-    # outside the allowlist (in its container or around it), or anything
-    # outside its container: a quoted trail, styling, any element at all, or
-    # another part of an email. A verified PDF always reads as this.
     VERIFIED_WITH_UNMARKED_CONTENT = "verified_with_unmarked_content"
-    # The message carries its own marker that does not verify (a leading
-    # marker whose container was removed included), or any X-AI-Generated
-    # header (whatever its value). Also, when no marker of the message's own
-    # verifies: an earlier unsigned (legacy JSON) marker or a body token that
-    # cannot be decoded, anywhere, a quoted trail included, since neither can
-    # be placed. So a reply that merely quotes a pre-signing message reads as
-    # this. Do not treat it as "this message was labelled" for mail you did
-    # not label yourself.
+    # Also returned for a reply that only quotes an earlier-format marker, so
+    # it does not show that the sender labelled this message.
     UNVERIFIED = "ai_marked_unverified"
     QUOTED_ONLY = "quoted_only"
     NONE = "no_marker"
@@ -504,7 +490,9 @@ def _detect_message(
         body = message.get_body(preferencelist=("html",))
         document = body.get_content() if body is not None else ""
         others = _other_parts(message, body)
-    except LookupError as exc:
+    except (LookupError, ValueError) as exc:
+        # An unknown charset, or a name the codec registry refuses (a NUL in
+        # it, or a codec such as idna that cannot decode a body).
         msg = f"cannot decode the HTML part: {exc}"
         raise MessageDecodeError(msg) from exc
     except RecursionError as exc:
@@ -586,10 +574,12 @@ def detect_file(
     anywhere (HTML). Anything else is read as a message.
 
     Input read as a message for its first line that has no HTML body and no
-    marker, but holds a tag, is read again as HTML, such as a fragment that
-    starts ``Note: ...``. That reading is reported when it finds a marker,
-    or when it is ``unparseable`` and the input holds ``data-ai-disclosure``,
-    so the guess never hides a marker as ``no_marker``.
+    marker is read again as a PDF or Office file when its first 1024 bytes
+    hold that signature, else as HTML when it holds a tag, such as a fragment
+    that starts ``Note: ...``. The file reading is reported when it finds a
+    marker; the HTML one when it finds a marker, or when it is
+    ``unparseable`` and the input holds ``data-ai-disclosure``. So the guess
+    never hides a marker as ``no_marker``.
 
     Raises:
         MessageDecodeError: The file could not be read far enough to look
@@ -630,9 +620,16 @@ def _detect_file(
 def _detect_header_led(
     data: bytes, text: bytes, keys: Mapping[str, Ed25519PublicKey] | None
 ) -> DetectionReport:
-    """Input that starts like a header field: a message, or else an HTML fragment."""
+    """Input that starts like a header field: a message, or else a file or an HTML fragment."""
     report, has_html = _detect_message(text, keys)
-    if has_html or report.verdict is not Verdict.NONE or not _HTML_TAG.search(text):
+    if has_html or report.verdict is not Verdict.NONE:
+        return report
+    window = data[:_SIGNATURE_WINDOW]
+    if b"%PDF-" in window or b"PK\x03\x04" in window:
+        detect = _detect_pdf if b"%PDF-" in window else _detect_ooxml
+        as_file = detect(data, keys)
+        return as_file if as_file.findings else report
+    if not _HTML_TAG.search(text):
         return report
     as_html = detect_html(data.decode("utf-8-sig", errors="replace"), keys)
     if as_html.findings or (
@@ -642,17 +639,24 @@ def _detect_header_led(
     return report
 
 
+# What reading a hostile Office package can raise. ``files`` turns a part's
+# read errors into ValueError; opening the package raises NotImplementedError
+# for an entry whose zip version it cannot extract.
+_PACKAGE_ERRORS = (
+    zipfile.BadZipFile,
+    NotImplementedError,
+    ElementTree.ParseError,
+    DefusedXmlException,
+    ValueError,
+)
+
+
 def _detect_ooxml(
     data: bytes, keys: Mapping[str, Ed25519PublicKey] | None
 ) -> DetectionReport:
     try:
         token = ooxml_token(data)
-    except (
-        zipfile.BadZipFile,
-        ElementTree.ParseError,
-        DefusedXmlException,
-        ValueError,
-    ) as exc:
+    except _PACKAGE_ERRORS as exc:
         msg = f"cannot read the Office package: {exc}"
         raise MessageDecodeError(msg) from exc
     return _detect_document(
@@ -691,12 +695,7 @@ def _detect_document(
     else:
         try:
             matches = digest() == finding.claims.get("content_sha256")
-        except (
-            ValueError,
-            zipfile.BadZipFile,
-            ElementTree.ParseError,
-            DefusedXmlException,
-        ):
+        except _PACKAGE_ERRORS:
             content = ContentCheck.NOT_FOUND
         else:
             content = ContentCheck.MATCH if matches else ContentCheck.MISMATCH
@@ -780,9 +779,7 @@ def _legacy_finding(value: str, carrier: Carrier, placement: Placement) -> Findi
     """The pre-signing JSON marker: still a disclosure, never verifiable."""
     try:
         claims = parse_json(value)
-    # ValueError also covers an integer over Python's digit limit, a repeated
-    # member and NaN; RecursionError, JSON nested too deeply.
-    except (ValueError, RecursionError) as exc:
+    except ValueError as exc:
         claims, error = {}, f"malformed legacy marker: {exc}"
     else:
         error = None if isinstance(claims, dict) else "malformed legacy marker"
