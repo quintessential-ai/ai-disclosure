@@ -24,7 +24,7 @@ from defusedxml.ElementTree import fromstring
 from ai_disclosure_verify.jws import b64url_encode
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable
 
 OOXML_CANONICALISATION = "ooxml-parts/1"
 PDF_CANONICALISATION = "pdf-revision/1"
@@ -58,11 +58,14 @@ _EOCD_SIZE = 22
 _ZIP64_END = b"PK\x06\x06"
 _ZIP64_LOCATOR = b"PK\x06\x07"
 _ZIP64_LOCATOR_SIZE = 20
+# The Zip64 end record's size field with no extensible data after the fixed fields.
+_ZIP64_END_SIZE = 44
 _DATA_DESCRIPTOR = b"PK\x07\x08"
-# The one extra field a package may carry (APPNOTE 4.5.3), and the most its
-# data can hold: two sizes, an offset and a disk number.
+# The one extra field a package may carry (APPNOTE 4.5.3), and the values in
+# a record's 32-bit and 16-bit fields that send a reader to it.
 _ZIP64_EXTRA_ID = 0x0001
-_ZIP64_EXTRA_MAX = 28
+_ZIP64_MARK = 0xFFFFFFFF
+_ZIP64_DISK_MARK = 0xFFFF
 # A part name holds no control character (ECMA-376 Part 2, 9.1.1), C1
 # included: a part name is an IRI, whose characters start at U+00A0. A line
 # feed in one would let two ``ooxml-parts/1`` listings read the same.
@@ -112,39 +115,56 @@ def is_ooxml(data: bytes) -> bool:
     return data.startswith(b"PK\x03\x04")
 
 
-def ooxml_uncovered(data: bytes) -> bool:
+def ooxml_uncovered(data: bytes, *, streams_complete: bool | None = None) -> bool:
     """Whether a package holds any byte its marker does not cover.
 
     The rule is the specification's, at the end of ``ooxml-parts/1``. Any
-    package zipfile cannot open counts as uncovered.
+    package zipfile cannot open counts as uncovered. ``streams_complete`` is
+    what ``ooxml_digest_and_streams`` found, when the caller has it; without
+    it, every part is read again to find out.
     """
     try:
         layout = _zip_layout(data)
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
-            infos = sorted(zf.infolist(), key=lambda info: info.header_offset)
+            infos = zf.infolist()
     except (zipfile.BadZipFile, ValueError, NotImplementedError, OSError):
         return True
     if layout is None:
         return True
     cd_start = layout
-    # The directory's own fields: what zipfile read from each record.
-    if any(
-        info.comment
-        or not _only_zip64(info.extra)
-        or (info.is_dir() and (info.compress_size or info.file_size))
-        for info in infos
-    ):
+    names = _central_names(data, cd_start, len(infos))
+    # The digest leaves out directory entries, so their names are unsigned.
+    if names is None or any(info.comment or info.is_dir() for info in infos):
         return True
+    entries = sorted(zip(infos, names, strict=True), key=lambda e: e[0].header_offset)
     position = 0
-    for index, info in enumerate(infos):
+    for index, (info, name) in enumerate(entries):
         following = (
-            infos[index + 1].header_offset if index + 1 < len(infos) else cd_start
+            entries[index + 1][0].header_offset
+            if index + 1 < len(entries)
+            else cd_start
         )
-        entry_end = _local_entry_end(data, info, position, following)
+        entry_end = _local_entry_end(data, info, name, position, following)
         if info.header_offset != position or entry_end is None:
             return True
         position = entry_end
-    return position != cd_start
+    if position != cd_start:
+        return True
+    if streams_complete is None:
+        streams_complete = _streams_complete(data)
+    return not streams_complete
+
+
+def _streams_complete(data: bytes) -> bool:
+    """Whether every part's data is exactly one stream of its declared sizes; False when one cannot be read."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            return all(
+                _entry_data(data, zf, info, lambda _chunk: None)
+                for info in _package_infos(zf).values()
+            )
+    except (zipfile.BadZipFile, ValueError, NotImplementedError, OSError):
+        return False
 
 
 def _zip_layout(data: bytes) -> int | None:
@@ -166,8 +186,10 @@ def _zip_layout(data: bytes) -> int | None:
         record = int.from_bytes(data[locator + 8 : locator + 16], "little")
         if data[record : record + 4] != _ZIP64_END:
             return None
+        # The record's size counts what follows its size field; anything
+        # past the fixed fields is extensible data, unread.
         record_size = int.from_bytes(data[record + 4 : record + 12], "little")
-        if record + 12 + record_size != locator:
+        if record_size != _ZIP64_END_SIZE or record + 12 + record_size != locator:
             return None
         cd_size = int.from_bytes(data[record + 40 : record + 48], "little")
         cd_start = int.from_bytes(data[record + 48 : record + 56], "little")
@@ -179,44 +201,127 @@ def _zip_layout(data: bytes) -> int | None:
     return cd_start
 
 
+def _central_names(data: bytes, cd_start: int, count: int) -> list[bytes] | None:
+    """Each central record's name bytes, in directory order.
+
+    None when a record's extra field is anything but the Zip64 values its
+    size, offset and disk fields call for.
+    """
+    names: list[bytes] = []
+    position = cd_start
+    for _ in range(count):
+        if data[position : position + 4] != b"PK\x01\x02":
+            return None
+        compressed = int.from_bytes(data[position + 20 : position + 24], "little")
+        uncompressed = int.from_bytes(data[position + 24 : position + 28], "little")
+        name_length = int.from_bytes(data[position + 28 : position + 30], "little")
+        extra_length = int.from_bytes(data[position + 30 : position + 32], "little")
+        comment_length = int.from_bytes(data[position + 32 : position + 34], "little")
+        disk = int.from_bytes(data[position + 34 : position + 36], "little")
+        offset = int.from_bytes(data[position + 42 : position + 46], "little")
+        extra_start = position + 46 + name_length
+        # APPNOTE 4.5.3: a value for each field that holds its maximum, in this order.
+        widths = [
+            8 for field in (uncompressed, compressed, offset) if field == _ZIP64_MARK
+        ]
+        if disk == _ZIP64_DISK_MARK:
+            widths.append(4)
+        if (
+            _zip64_values(data[extra_start : extra_start + extra_length], widths)
+            is None
+        ):
+            return None
+        names.append(data[position + 46 : extra_start])
+        position = extra_start + extra_length + comment_length
+    return names
+
+
 def _local_entry_end(
-    data: bytes, info: zipfile.ZipInfo, start: int, following: int
+    data: bytes, info: zipfile.ZipInfo, name: bytes, start: int, following: int
 ) -> int | None:
-    """Where the local entry at ``start`` ends, or None when it is not one the marker covers."""
+    """Where the local entry at ``start`` ends, or None when it is not one the marker covers.
+
+    ``name`` is the entry's name as its central record holds it.
+    """
     if data[start : start + 4] != b"PK\x03\x04":
         return None
     name_length = int.from_bytes(data[start + 26 : start + 28], "little")
     extra_length = int.from_bytes(data[start + 28 : start + 30], "little")
     extra_start = start + 30 + name_length
-    if not _only_zip64(data[extra_start : extra_start + extra_length]):
+    if data[start + 30 : extra_start] != name or not _local_fields_agree(
+        data, start, data[extra_start : extra_start + extra_length], info
+    ):
         return None
     end = extra_start + extra_length + info.compress_size
     if not info.flag_bits & 0x8:
         return end
     # A data descriptor: CRC and sizes, 4- or 8-byte, with or without its
-    # signature. The one that reaches the next record is the one written.
+    # signature. The one that reaches the next record, holding what the
+    # directory declares, is the one written.
+    declared = (info.CRC, info.compress_size, info.file_size)
     for size in (12, 16, 20, 24):
         has_signature = size in (16, 24)
         if has_signature and data[end : end + 4] != _DATA_DESCRIPTOR:
             continue
-        if end + size == following:
+        fields = end + 4 if has_signature else end
+        width = 8 if size in (20, 24) else 4
+        held = (
+            int.from_bytes(data[fields : fields + 4], "little"),
+            int.from_bytes(data[fields + 4 : fields + 4 + width], "little"),
+            int.from_bytes(data[fields + 4 + width : fields + 4 + 2 * width], "little"),
+        )
+        if end + size == following and held == declared:
             return end + size
     return None
 
 
-def _only_zip64(extra: bytes) -> bool:
-    """Whether an extra-field block is empty or one well-formed Zip64 field."""
-    if not extra:
-        return True
-    if len(extra) < 4:
+def _local_fields_agree(
+    data: bytes, start: int, extra: bytes, info: zipfile.ZipInfo
+) -> bool:
+    """Whether the local header's CRC-32, sizes and extra field are what the central directory declares.
+
+    zipfile reads only the directory's, so a local value that differs is an
+    unread byte. Behind a data descriptor (flag bit 3) each may also be zero,
+    as writers leave them.
+    """
+    crc = int.from_bytes(data[start + 14 : start + 18], "little")
+    compressed = int.from_bytes(data[start + 18 : start + 22], "little")
+    uncompressed = int.from_bytes(data[start + 22 : start + 26], "little")
+    zip64 = _ZIP64_MARK in (compressed, uncompressed)
+    # A local Zip64 field holds both sizes, uncompressed first (APPNOTE 4.5.3).
+    if zip64 and compressed != uncompressed:
         return False
-    field_id = int.from_bytes(extra[0:2], "little")
-    size = int.from_bytes(extra[2:4], "little")
-    return (
-        field_id == _ZIP64_EXTRA_ID
-        and size <= _ZIP64_EXTRA_MAX
-        and len(extra) == 4 + size
-    )
+    values = _zip64_values(extra, [8, 8] if zip64 else [])
+    if values is None:
+        return False
+    if zip64:
+        uncompressed, compressed = values
+    held = (crc, compressed, uncompressed)
+    declared = (info.CRC, info.compress_size, info.file_size)
+    if info.flag_bits & 0x8:
+        return all(
+            value in (0, want) for value, want in zip(held, declared, strict=True)
+        )
+    return held == declared
+
+
+def _zip64_values(extra: bytes, widths: list[int]) -> list[int] | None:
+    """The values in ``extra`` when it is one Zip64 field of exactly ``widths``, or empty when ``widths`` is; else None."""
+    if not widths:
+        return [] if not extra else None
+    size = sum(widths)
+    if (
+        len(extra) != 4 + size
+        or int.from_bytes(extra[0:2], "little") != _ZIP64_EXTRA_ID
+        or int.from_bytes(extra[2:4], "little") != size
+    ):
+        return None
+    values: list[int] = []
+    at = 4
+    for width in widths:
+        values.append(int.from_bytes(extra[at : at + width], "little"))
+        at += width
+    return values
 
 
 def is_pdf(data: bytes) -> bool:
@@ -256,34 +361,107 @@ def _package_infos(zf: zipfile.ZipFile) -> dict[str, zipfile.ZipInfo]:
     return by_name
 
 
-def _read_chunks(zf: zipfile.ZipFile, info: zipfile.ZipInfo) -> Iterator[bytes]:
-    # A sized read inflates at most that much per step and stops at the
-    # declared size; an unsized one inflates the whole stream first.
+def _entry_data(
+    data: bytes,
+    zf: zipfile.ZipFile,
+    info: zipfile.ZipInfo,
+    sink: Callable[[bytes], object],
+) -> bool:
+    """Pass an entry's data, as zipfile extracts it, to ``sink``; whether it is exactly one stream of its declared sizes.
+
+    zipfile stops at the end of a deflate stream and at the declared
+    uncompressed size, leaving any byte after either unread; reading the
+    entry from ``data`` shows them. Raises ``zipfile.BadZipFile`` when the
+    data read fails its CRC-32, as zipfile does, and ValueError when it does
+    not inflate.
+    """
     try:
-        with zf.open(info) as part:
-            while chunk := part.read(_READ_CHUNK):
-                yield chunk
-    except (RuntimeError, NotImplementedError, OSError, EOFError, zlib.error) as exc:
+        # Opening checks the local header as zipfile does; nothing is read through it.
+        with zf.open(info):
+            pass
+    except (RuntimeError, NotImplementedError, OSError) as exc:
         msg = f"cannot read Office package parts: {exc}"
         raise ValueError(msg) from exc
+    name_length = int.from_bytes(
+        data[info.header_offset + 26 : info.header_offset + 28], "little"
+    )
+    extra_length = int.from_bytes(
+        data[info.header_offset + 28 : info.header_offset + 30], "little"
+    )
+    start = info.header_offset + 30 + name_length + extra_length
+    raw = memoryview(data)[start : start + info.compress_size]
+    if len(raw) != info.compress_size:
+        msg = f"cannot read Office package parts: {info.filename} is truncated"
+        raise ValueError(msg)
+    crc = 0
+
+    def emit(chunk: bytes | memoryview) -> None:
+        nonlocal crc
+        crc = zlib.crc32(chunk, crc)
+        sink(bytes(chunk))
+
+    if info.compress_type == zipfile.ZIP_STORED:
+        for at in range(0, min(len(raw), info.file_size), _READ_CHUNK):
+            emit(raw[at : min(at + _READ_CHUNK, info.file_size)])
+        complete = info.compress_size == info.file_size
+    else:
+        complete = _inflate(raw, info.file_size, emit)
+    if crc != info.CRC:
+        msg = f"Bad CRC-32 for file {info.filename!r}"
+        raise zipfile.BadZipFile(msg)
+    return complete
 
 
-def _read_part(zf: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes:
-    """A routing or metadata part, whole; refused over ``MAX_XML_PART_BYTES``."""
+def _inflate(raw: memoryview, size: int, emit: Callable[[bytes], None]) -> bool:
+    """Inflate ``raw``, emitting its first ``size`` bytes; whether it is one deflate stream that fills ``raw`` and inflates to exactly ``size``."""
+    stream = zlib.decompressobj(-zlib.MAX_WBITS)
+    position = 0
+    produced = 0
+    try:
+        # Each step inflates at most a chunk, so a small stream cannot
+        # inflate into one large one, and stops once past ``size``.
+        while produced <= size and not stream.eof:
+            piece = stream.unconsumed_tail
+            if not piece:
+                piece = raw[position : position + _READ_CHUNK]
+                position += len(piece)
+            out = stream.decompress(piece, _READ_CHUNK)
+            if not out and not piece:
+                break
+            emit(out[: size - produced])
+            produced += len(out)
+    except zlib.error as exc:
+        msg = f"cannot read Office package parts: {exc}"
+        raise ValueError(msg) from exc
+    return (
+        stream.eof
+        and not stream.unused_data
+        and position == len(raw)
+        and produced == size
+    )
+
+
+def _read_part(
+    data: bytes, zf: zipfile.ZipFile, info: zipfile.ZipInfo
+) -> tuple[bytes, bool]:
+    """A routing or metadata part, whole, and whether its data is one complete stream; refused over ``MAX_XML_PART_BYTES``."""
     if info.file_size > MAX_XML_PART_BYTES:
         msg = (
             f"Office routing or metadata part {info.filename} is over "
             f"{MAX_XML_PART_BYTES} bytes"
         )
         raise ValueError(msg)
-    return b"".join(_read_chunks(zf, info))
+    chunks: list[bytes] = []
+    complete = _entry_data(data, zf, info, chunks.append)
+    return b"".join(chunks), complete
 
 
-def _part_sha256(zf: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes:
+def _part_sha256(
+    data: bytes, zf: zipfile.ZipFile, info: zipfile.ZipInfo
+) -> tuple[bytes, bool]:
     digest = hashlib.sha256()
-    for chunk in _read_chunks(zf, info):
-        digest.update(chunk)
-    return digest.digest()
+    complete = _entry_data(data, zf, info, digest.update)
+    return digest.digest(), complete
 
 
 def _custom_properties_part(rels: bytes | None) -> str:
@@ -330,17 +508,29 @@ def ooxml_digest(data: bytes) -> str:
     other than the routing and custom-properties ones are hashed as they are
     inflated.
     """
+    return ooxml_digest_and_streams(data)[0]
+
+
+def ooxml_digest_and_streams(data: bytes) -> tuple[str, bool]:
+    """``ooxml_digest``, and whether every part's data is exactly one stream of its declared sizes.
+
+    Both come from one read of each part; ``ooxml_uncovered`` takes the
+    second, so a checker inflates each part once.
+    """
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         infos = _package_infos(zf)
-        rels = _read_part(zf, infos[_ROOT_RELS]) if _ROOT_RELS in infos else None
+        complete = True
+        rels = None
+        if _ROOT_RELS in infos:
+            rels, whole = _read_part(data, zf, infos[_ROOT_RELS])
+            complete &= whole
         custom = _custom_properties_part(rels)
-        if (
-            custom in infos
-            and fromstring(_read_part(zf, infos[custom])).tag
-            != f"{{{_NS_CUSTOM}}}Properties"
-        ):
-            msg = "custom-properties part is not metadata"
-            raise ValueError(msg)
+        if custom in infos:
+            properties, whole = _read_part(data, zf, infos[custom])
+            complete &= whole
+            if fromstring(properties).tag != f"{{{_NS_CUSTOM}}}Properties":
+                msg = "custom-properties part is not metadata"
+                raise ValueError(msg)
         hashes: dict[str, bytes] = {}
         for name, info in infos.items():
             if name == custom:
@@ -350,20 +540,20 @@ def ooxml_digest(data: bytes) -> str:
                     rels, f"{{{_NS_REL}}}Relationship", "Type", _REL_CUSTOM
                 )
             elif name == _CONTENT_TYPES:
+                types, whole = _read_part(data, zf, info)
+                complete &= whole
                 routing = _normalized_routing(
-                    _read_part(zf, info),
-                    f"{{{_NS_CT}}}Override",
-                    "PartName",
-                    f"/{custom}",
+                    types, f"{{{_NS_CT}}}Override", "PartName", f"/{custom}"
                 )
             else:
-                hashes[name] = _part_sha256(zf, info)
+                hashes[name], whole = _part_sha256(data, zf, info)
+                complete &= whole
                 continue
             hashes[name] = hashlib.sha256(routing).digest()
     listing = "".join(
         f"{name}\n{b64url_encode(hashes[name])}\n" for name in sorted(hashes)
     )
-    return b64url_encode(hashlib.sha256(listing.encode("utf-8")).digest())
+    return b64url_encode(hashlib.sha256(listing.encode("utf-8")).digest()), complete
 
 
 def pdf_digest(revision: bytes) -> str:
@@ -388,11 +578,13 @@ def ooxml_token(data: bytes) -> str | None:
     """
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         infos = _package_infos(zf)
-        rels = _read_part(zf, infos[_ROOT_RELS]) if _ROOT_RELS in infos else None
+        rels = (
+            _read_part(data, zf, infos[_ROOT_RELS])[0] if _ROOT_RELS in infos else None
+        )
         part = _custom_properties_part(rels)
         if part not in infos:
             return None
-        props = fromstring(_read_part(zf, infos[part]))
+        props = fromstring(_read_part(data, zf, infos[part])[0])
     if props.tag != f"{{{_NS_CUSTOM}}}Properties":
         msg = "custom-properties part is not metadata"
         raise ValueError(msg)

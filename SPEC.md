@@ -182,8 +182,8 @@ When a deployment has no signing key, the marker is still issued, with
 states the same facts but proves nothing about its origin. A verifier reports
 it as unsigned and never as verified. A token with `alg: none` and a
 non-empty signature is invalid. With the reference issuer, when the token
-would exceed 8192 characters, the message carries the visible label without
-a token. So does a message whose `on_behalf_of` is longer than 256
+would exceed 8192 characters, the message carries the visible label and the
+`X-AI-Generated` header without a token. So does a message whose `on_behalf_of` is longer than 256
 characters, and a file in either case carries its visible label and unsigned
 fields only.
 
@@ -643,10 +643,12 @@ Recompressing (stored or deflated) or reordering the package keeps the
 digest; changing any part's content (text, numbers, styles, images) breaks it.
 Every byte of the package belongs to a part's local entry, the central
 directory or the end record, each where the central directory and the end
-record place it, with no entry comment, no extra field other than Zip64's,
-and no data in a directory entry. Any other byte, before, between or after
-them, the end record's comment included, is content the marker does not
-cover.
+record place it, with no entry comment, no extra field other than Zip64's
+and no directory entry, and an entry's data is exactly one stream of its
+declared sizes. Any other byte, before, between or after them, the end
+record's comment included, is content the marker does not cover.
+
+Each local header, and each data descriptor that follows an entry, gives the same name, CRC-32 and sizes as the entry's central directory record. A Zip64 extended-information field appears only where a 32-bit field holds 0xFFFFFFFF, with exactly the values those fields call for, and the Zip64 end record carries no extensible data. A package that breaks any of these has bytes its marker does not cover. The end record names disk 0 and counts every central directory record; a package that does not is refused.
 
 ### `pdf-revision/1`
 

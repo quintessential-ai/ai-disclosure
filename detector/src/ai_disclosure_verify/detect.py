@@ -40,7 +40,7 @@ from ai_disclosure_verify.files import (
     PDF_CANONICALISATION,
     is_ooxml,
     is_pdf,
-    ooxml_digest,
+    ooxml_digest_and_streams,
     ooxml_token,
     ooxml_uncovered,
     pdf_digest,
@@ -112,8 +112,6 @@ class Verdict(StrEnum):
     # The specification's verdict table defines each value.
     VERIFIED = "verified"
     VERIFIED_WITH_UNMARKED_CONTENT = "verified_with_unmarked_content"
-    # Also returned for a reply that only quotes an earlier-format marker, so
-    # it does not show that the sender labelled this message.
     UNVERIFIED = "ai_marked_unverified"
     QUOTED_ONLY = "quoted_only"
     NONE = "no_marker"
@@ -363,11 +361,7 @@ _ESCAPES = {"\\": "\\\\", '"': '\\"'}
 
 
 def _escaped(text: str) -> str:
-    """``text`` with ``\\``, ``"`` and unprintable characters as Python escapes.
-
-    Unprintable covers C0 and C1 controls, line and paragraph separators and
-    format characters such as bidirectional overrides.
-    """
+    """``text`` with ``\\``, ``"`` and unprintable characters as Python escapes."""
     return "".join(
         _ESCAPES.get(ch, ch) if ch.isprintable() else ascii(ch)[1:-1] for ch in text
     )
@@ -395,9 +389,6 @@ def detect_html(
     document (no text before it, not inside a ``blockquote`` or another
     container). With a header token it must also share the header's ``mid``;
     a header whose content does not lead the document is ``NOT_LEADING``.
-    When no container leads, a body marker that itself leads, its container
-    gone, is the original, with its content not found. A body token that
-    cannot be decoded, like a legacy marker, cannot be placed.
     A document ``scan_html`` cannot read gives an empty, ``unparseable`` report.
     """
     return _detect_html(
@@ -672,11 +663,26 @@ def _detect_ooxml(
     except _PACKAGE_ERRORS as exc:
         msg = f"cannot read the Office package: {exc}"
         raise MessageDecodeError(msg) from exc
-    report = _detect_document(
-        token, keys, OOXML_CANONICALISATION, lambda: ooxml_digest(data)
+    # What the digest's read found of the parts' streams, so coverage needs
+    # no second read; False when that read failed.
+    streams: dict[str, bool] = {}
+
+    def digest() -> str:
+        streams["complete"] = False
+        value, streams["complete"] = ooxml_digest_and_streams(data)
+        return value
+
+    report = _detect_document(token, keys, OOXML_CANONICALISATION, digest)
+    if token is None:
+        return report
+    # Bytes outside the package's records, or after a part's stream, are not
+    # covered by its marker.
+    return replace(
+        report,
+        unmarked_content=ooxml_uncovered(
+            data, streams_complete=streams.get("complete")
+        ),
     )
-    # Bytes outside the package's records are not covered by its marker.
-    return replace(report, unmarked_content=token is not None and ooxml_uncovered(data))
 
 
 def _detect_pdf(

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import base64
+import collections
 import hashlib
 import io
 import json
 import re
 import zipfile
+import zlib
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -973,7 +975,6 @@ def _rewritten(
     comment: bytes = b"",
     added: tuple[tuple[str, bytes], ...] = (),
     force_zip64: bool = False,
-    directory_compression: int = zipfile.ZIP_STORED,
 ) -> bytes:
     """``package``'s parts written again, with ``added`` entries after them.
 
@@ -990,7 +991,7 @@ def _rewritten(
             entry = zipfile.ZipInfo(name, (2026, 1, 1, 0, 0, 0))
             # Deflating nothing still writes two bytes, so a directory is stored.
             entry.compress_type = (
-                directory_compression if name.endswith("/") else zipfile.ZIP_DEFLATED
+                zipfile.ZIP_STORED if name.endswith("/") else zipfile.ZIP_DEFLATED
             )
             entry.extra = local_extra if index == 0 else b""
             with target.open(entry, "w", force_zip64=force_zip64) as part:
@@ -1004,6 +1005,10 @@ def _rewritten(
 
 
 _NOTE = b"Pay to account 1234"
+# A directory name says what the writer likes: the digest leaves it out.
+_HUMAN_CLAIM = "THIS DOCUMENT WAS WRITTEN BY A HUMAN; NO AI WAS USED/"
+# Zip64 values no 32-bit field calls for.
+_ZIP64_PAYLOAD = b"HIDDEN-PAYLOAD-28-BYTES-XXXX"
 
 
 @pytest.mark.parametrize(
@@ -1026,14 +1031,20 @@ _NOTE = b"Pay to account 1234"
             id="local-zip64-over-its-largest",
         ),
         pytest.param(
-            {"local_extra": _extra_field(0x0001, b"\x00" * 29)},
-            id="local-zip64-one-over-its-largest",
-        ),
-        pytest.param(
             {"local_extra": _extra_field(0x0001, b"\x00" * 16)[:-4]},
             id="local-zip64-overrunning",
         ),
         pytest.param({"central_extra": b"abc"}, id="central-extra-truncated"),
+        pytest.param({"added": (("notes/", b""),)}, id="empty-directory"),
+        pytest.param({"added": ((_HUMAN_CLAIM, b""),)}, id="directory-name"),
+        pytest.param(
+            {"local_extra": _extra_field(0x0001, _ZIP64_PAYLOAD)},
+            id="local-zip64-nothing-calls-for",
+        ),
+        pytest.param(
+            {"central_extra": _extra_field(0x0001, _ZIP64_PAYLOAD)},
+            id="central-zip64-nothing-calls-for",
+        ),
     ],
 )
 def test_bytes_in_a_record_the_format_does_not_need_are_not_covered(
@@ -1053,16 +1064,7 @@ def test_bytes_in_a_record_the_format_does_not_need_are_not_covered(
     "rewrite",
     [
         pytest.param({}, id="rewritten"),
-        pytest.param({"added": (("notes/", b""),)}, id="empty-directory"),
         pytest.param({"force_zip64": True}, id="zip64-local-headers"),
-        pytest.param(
-            {"central_extra": _extra_field(0x0001, b"\x00" * 16)},
-            id="zip64-directory-field",
-        ),
-        pytest.param(
-            {"local_extra": _extra_field(0x0001, b"\x00" * 28)},
-            id="zip64-field-at-its-largest",
-        ),
     ],
 )
 def test_a_package_with_only_the_records_the_format_needs_verifies(
@@ -1072,21 +1074,6 @@ def test_a_package_with_only_the_records_the_format_needs_verifies(
 
     assert detect_file(package, KEYS).verdict is Verdict.VERIFIED
     assert _cli(tmp_path, "input.docx", package, jwks_file) == cli.EXIT_VERIFIED
-
-
-def test_a_directory_entry_declaring_either_size_is_not_covered(docx: bytes) -> None:
-    # Deflated, an empty directory holds two bytes but declares none unpacked.
-    deflated = _rewritten(
-        docx, added=(("notes/", b""),), directory_compression=zipfile.ZIP_DEFLATED
-    )
-    # Stored, it holds none but its directory record declares five unpacked.
-    declared = _with_central_field(
-        _rewritten(docx, added=(("notes/", b""),)), "notes/", 24, 5
-    )
-
-    for package in (deflated, declared):
-        assert files._zip_layout(package) is not None
-        assert files.ooxml_uncovered(package) is True
 
 
 def test_the_forced_zip64_package_carries_a_zip64_field(docx: bytes) -> None:
@@ -1130,6 +1117,498 @@ def test_a_package_written_with_data_descriptors_is_covered(docx: bytes) -> None
 def test_a_signed_package_alone_is_covered(docx: bytes) -> None:
     assert files.ooxml_uncovered(docx) is False
     assert detect_file(docx, KEYS).verdict is Verdict.VERIFIED
+
+
+def _local_header(package: bytes, name: str) -> int:
+    with zipfile.ZipFile(io.BytesIO(package)) as zf:
+        return zf.getinfo(name).header_offset
+
+
+def _data_bounds(package: bytes, name: str) -> tuple[int, int]:
+    """Where ``name``'s data starts and ends, as its records declare it."""
+    with zipfile.ZipFile(io.BytesIO(package)) as zf:
+        info = zf.getinfo(name)
+    local = info.header_offset
+    name_length = int.from_bytes(package[local + 26 : local + 28], "little")
+    extra_length = int.from_bytes(package[local + 28 : local + 30], "little")
+    start = local + 30 + name_length + extra_length
+    return start, start + info.compress_size
+
+
+def _moved_after(data: bytearray, local: int, shift: int) -> bytes:
+    """``data`` grown by ``shift`` after the entry at ``local``, later offsets moved."""
+    cd_start, eocd = _cd_bounds(bytes(data))
+    cd_start += shift
+    position = cd_start
+    while data[position : position + 4] == b"PK\x01\x02":
+        offset = int.from_bytes(data[position + 42 : position + 46], "little")
+        if offset > local:
+            data[position + 42 : position + 46] = (offset + shift).to_bytes(4, "little")
+        lengths = [
+            int.from_bytes(data[position + at : position + at + 2], "little")
+            for at in (28, 30, 32)
+        ]
+        position += 46 + sum(lengths)
+    data[eocd + 16 : eocd + 20] = cd_start.to_bytes(4, "little")
+    return bytes(data)
+
+
+def _with_entry_data(
+    package: bytes,
+    name: str,
+    raw: bytes,
+    *,
+    file_size: int | None = None,
+) -> bytes:
+    """``package`` with ``name``'s data replaced by ``raw``, both records declaring it.
+
+    ``file_size``, when given, is declared as the uncompressed size; the
+    CRC-32 is left as it was.
+    """
+    start, end = _data_bounds(package, name)
+    local = _local_header(package, name)
+    data = bytearray(package[:start] + raw + package[end:])
+    sizes = [(18, len(raw))] + ([(22, file_size)] if file_size is not None else [])
+    for offset, value in sizes:
+        data[local + offset : local + offset + 4] = value.to_bytes(4, "little")
+    shift = len(raw) - (end - start)
+    central = _cd_bounds(package)[0] + shift
+    while data[central + 46 : central + 46 + len(name)] != name.encode():
+        central = data.index(b"PK\x01\x02", central + 4)
+    # A central record's sizes sit two bytes after the local header's.
+    for offset, value in sizes:
+        data[central + offset + 2 : central + offset + 6] = value.to_bytes(4, "little")
+    return _moved_after(data, local, shift)
+
+
+def _entry_raw(package: bytes, name: str) -> bytes:
+    start, end = _data_bounds(package, name)
+    return package[start:end]
+
+
+def _deflated(data: bytes, *, level: int = 6, finish: bool = True) -> bytes:
+    stream = zlib.compressobj(level, zlib.DEFLATED, -zlib.MAX_WBITS)
+    return stream.compress(data) + stream.flush(
+        zlib.Z_FINISH if finish else zlib.Z_SYNC_FLUSH
+    )
+
+
+def _stored(package: bytes) -> bytes:
+    buffer = io.BytesIO()
+    with (
+        zipfile.ZipFile(io.BytesIO(package)) as source,
+        zipfile.ZipFile(buffer, "w", zipfile.ZIP_STORED) as target,
+    ):
+        for info in source.infolist():
+            target.writestr(info.filename, source.read(info))
+    return buffer.getvalue()
+
+
+def _document(package: bytes) -> bytes:
+    with zipfile.ZipFile(io.BytesIO(package)) as zf:
+        return zf.read("word/document.xml")
+
+
+_PADDING = (b"Pay to account 1234\n" * 21)[:410]
+
+
+@pytest.mark.parametrize("compressed", [True, False], ids=["deflated", "stored"])
+@pytest.mark.parametrize(
+    "part",
+    ["word/document.xml", "_rels/.rels", "[Content_Types].xml", "docProps/custom.xml"],
+)
+def test_bytes_after_a_parts_stream_are_not_covered(
+    part: str, compressed: bool, docx: bytes, jwks_file: Path, tmp_path: Path
+) -> None:
+    """zipfile stops at a stream's end and at the declared size, leaving the rest."""
+    package = _rewritten(docx) if compressed else _stored(docx)
+    padded = _with_entry_data(package, part, _entry_raw(package, part) + _PADDING)
+
+    assert detect_file(padded, KEYS).verdict is Verdict.VERIFIED_WITH_UNMARKED_CONTENT
+    assert (
+        _cli(tmp_path, "input.docx", padded, jwks_file)
+        == cli.EXIT_VERIFIED_WITH_UNMARKED_CONTENT
+    )
+    assert files.ooxml_uncovered(padded) is True
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param(
+            lambda body: _deflated(body + _NOTE), id="inflating-past-its-size"
+        ),
+        pytest.param(
+            lambda body: _deflated(body, finish=False), id="stream-without-its-end"
+        ),
+        pytest.param(
+            lambda body: _deflated(body) + _deflated(_NOTE), id="second-stream"
+        ),
+    ],
+)
+def test_a_deflated_part_that_is_not_one_whole_stream_is_not_covered(
+    raw: Callable[[bytes], bytes], docx: bytes, jwks_file: Path, tmp_path: Path
+) -> None:
+    """zipfile reads these as the signed body, with its declared size and CRC-32."""
+    package = _with_entry_data(
+        _rewritten(docx), "word/document.xml", raw(_document(docx))
+    )
+
+    assert detect_file(package, KEYS).verdict is Verdict.VERIFIED_WITH_UNMARKED_CONTENT
+    assert (
+        _cli(tmp_path, "input.docx", package, jwks_file)
+        == cli.EXIT_VERIFIED_WITH_UNMARKED_CONTENT
+    )
+
+
+@pytest.mark.parametrize("compressed", [True, False], ids=["deflated", "stored"])
+def test_a_part_declaring_more_than_its_stream_holds_is_not_covered(
+    compressed: bool, docx: bytes
+) -> None:
+    package = _rewritten(docx) if compressed else _stored(docx)
+    name = "word/document.xml"
+    short = _with_entry_data(
+        package,
+        name,
+        _entry_raw(package, name),
+        file_size=len(_document(docx)) + 5,
+    )
+
+    assert detect_file(short, KEYS).verdict is Verdict.VERIFIED_WITH_UNMARKED_CONTENT
+
+
+def test_bytes_after_a_stream_that_ends_on_a_read_boundary_are_not_covered(
+    docx: bytes,
+) -> None:
+    """The stream ends where a read does, so bytes after it are never inflated."""
+
+    def body(length: int) -> bytes:
+        return b"<w:document>" + b"x" * length + b"</w:document>"
+
+    # Stored deflate blocks make the stream's length exact.
+    length = next(
+        n
+        for n in range(files._READ_CHUNK - 200, files._READ_CHUNK)
+        if len(_deflated(body(n), level=0)) == files._READ_CHUNK
+    )
+    signed = _zip(_signed_parts(docx, {"word/document.xml": body(length)}))
+    assert detect_file(signed, KEYS).verdict is Verdict.VERIFIED
+    package = _with_entry_data(
+        signed, "word/document.xml", _deflated(body(length), level=0) + _PADDING
+    )
+
+    assert detect_file(package, KEYS).verdict is Verdict.VERIFIED_WITH_UNMARKED_CONTENT
+
+
+@pytest.mark.parametrize(
+    ("rewrite", "field"),
+    [
+        pytest.param({}, 14, id="crc"),
+        pytest.param({}, 18, id="compressed-size"),
+        pytest.param({}, 22, id="uncompressed-size"),
+        pytest.param(
+            {"force_zip64": True}, 30 + 17 + 4 + 8, id="zip64-compressed-size"
+        ),
+    ],
+)
+def test_a_local_header_disagreeing_with_the_directory_is_not_covered(
+    rewrite: dict[str, Any], field: int, docx: bytes, jwks_file: Path, tmp_path: Path
+) -> None:
+    """zipfile reads the directory's CRC-32 and sizes; the local header's go unread."""
+    package = _rewritten(docx, **rewrite)
+    local = _local_header(package, "word/document.xml")
+    assert package[local + 30 : local + 47] == b"word/document.xml"
+    data = bytearray(package)
+    data[local + field] ^= 0x01
+    tampered = bytes(data)
+
+    assert detect_file(tampered, KEYS).verdict is Verdict.VERIFIED_WITH_UNMARKED_CONTENT
+    assert (
+        _cli(tmp_path, "input.docx", tampered, jwks_file)
+        == cli.EXIT_VERIFIED_WITH_UNMARKED_CONTENT
+    )
+
+
+def _with_local_name(package: bytes, name: str, local_name: bytes) -> bytes:
+    """``package`` with ``name``'s local header, not its central one, renamed."""
+    local = _local_header(package, name)
+    data = bytearray(
+        package[: local + 26]
+        + len(local_name).to_bytes(2, "little")
+        + package[local + 28 : local + 30]
+        + local_name
+        + package[local + 30 + len(name.encode()) :]
+    )
+    return _moved_after(data, local, len(local_name) - len(name.encode()))
+
+
+def test_a_local_name_other_than_the_directorys_is_not_covered(
+    docx: bytes, jwks_file: Path, tmp_path: Path
+) -> None:
+    """zipfile compares the two names only for the entries it opens."""
+    with_directory = _rewritten(docx, added=(("word/", b""),))
+    hidden = _with_local_name(with_directory, "word/", b"word/" + _PADDING)
+
+    assert detect_file(hidden, KEYS).verdict is Verdict.VERIFIED_WITH_UNMARKED_CONTENT
+    assert (
+        _cli(tmp_path, "input.docx", hidden, jwks_file)
+        == cli.EXIT_VERIFIED_WITH_UNMARKED_CONTENT
+    )
+    # The record rule holds on its own, whatever reading the parts finds.
+    name = "word/document.xml"
+    renamed = _with_local_name(docx, name, name.encode() + _NOTE)
+    assert files.ooxml_uncovered(renamed, streams_complete=True) is True
+    assert files.ooxml_uncovered(docx, streams_complete=True) is False
+
+
+def _with_zip64_end(package: bytes, extensible: bytes) -> bytes:
+    """``package`` with a Zip64 end record holding ``extensible``, and a locator."""
+    eocd = _eocd(package)
+    count = package[eocd + 10 : eocd + 12]
+    cd_size = package[eocd + 12 : eocd + 16]
+    cd_start = package[eocd + 16 : eocd + 20]
+
+    def eight(field: bytes) -> bytes:
+        return field.ljust(8, b"\x00")
+
+    record = (
+        b"PK\x06\x06"
+        + (44 + len(extensible)).to_bytes(8, "little")
+        + (45).to_bytes(2, "little") * 2
+        + b"\x00" * 8
+        + eight(count) * 2
+        + eight(cd_size)
+        + eight(cd_start)
+        + extensible
+    )
+    locator = (
+        b"PK\x06\x07"
+        + b"\x00" * 4
+        + eocd.to_bytes(8, "little")
+        + (1).to_bytes(4, "little")
+    )
+    return package[:eocd] + record + locator + package[eocd:]
+
+
+@pytest.mark.parametrize(
+    ("extensible", "verdict"),
+    [
+        pytest.param(b"", Verdict.VERIFIED, id="fixed-fields-only"),
+        pytest.param(
+            b"HIDDEN PAYLOAD " * 30,
+            Verdict.VERIFIED_WITH_UNMARKED_CONTENT,
+            id="extensible-data",
+        ),
+    ],
+)
+def test_a_zip64_end_record_holds_only_its_fixed_fields(
+    extensible: bytes, verdict: Verdict, docx: bytes
+) -> None:
+    package = _with_zip64_end(docx, extensible)
+
+    assert detect_file(package, KEYS).verdict is verdict
+
+
+def _with_central_zip64(
+    package: bytes,
+    name: str,
+    *,
+    sizes: bool = True,
+    offset: bool = False,
+    disk: bool = False,
+) -> bytes:
+    """``package`` with the chosen central fields of ``name`` in a Zip64 field."""
+    with zipfile.ZipFile(io.BytesIO(package)) as zf:
+        info = zf.getinfo(name)
+    cd_start, eocd = _cd_bounds(package)
+    central = cd_start
+    while package[central + 46 : central + 46 + len(name)] != name.encode():
+        central = package.index(b"PK\x01\x02", central + 4)
+    assert package[central + 30 : central + 32] == b"\x00\x00"
+    record = bytearray(package[central : central + 46 + len(name)])
+    # APPNOTE 4.5.3 order: uncompressed size, compressed size, offset, disk.
+    values = b""
+    if sizes:
+        values += info.file_size.to_bytes(8, "little")
+        values += info.compress_size.to_bytes(8, "little")
+        record[20:28] = b"\xff" * 8
+    if offset:
+        values += info.header_offset.to_bytes(8, "little")
+        record[42:46] = b"\xff" * 4
+    if disk:
+        values += (0).to_bytes(4, "little")
+        record[34:36] = b"\xff" * 2
+    field = _extra_field(0x0001, values)
+    record[30:32] = len(field).to_bytes(2, "little")
+    data = bytearray(
+        package[:central] + record + field + package[central + 46 + len(name) :]
+    )
+    eocd += len(field)
+    cd_size = int.from_bytes(data[eocd + 12 : eocd + 16], "little") + len(field)
+    data[eocd + 12 : eocd + 16] = cd_size.to_bytes(4, "little")
+    return bytes(data)
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        pytest.param({}, id="sizes"),
+        pytest.param({"sizes": False, "offset": True}, id="offset"),
+        pytest.param({"sizes": False, "disk": True}, id="disk"),
+        pytest.param({"offset": True, "disk": True}, id="all"),
+    ],
+)
+def test_a_central_zip64_field_its_fields_call_for_verifies(
+    fields: dict[str, bool], docx: bytes
+) -> None:
+    package = _with_central_zip64(docx, "word/document.xml", **fields)
+    with zipfile.ZipFile(io.BytesIO(package)) as zf:
+        assert zf.getinfo("word/document.xml").extra[:2] == b"\x01\x00"
+
+    assert detect_file(package, KEYS).verdict is Verdict.VERIFIED
+
+
+def _local_zip64_field(package: bytes, name: str) -> int:
+    """Where the Zip64 field in ``name``'s local header starts."""
+    local = _local_header(package, name)
+    start = local + 30 + int.from_bytes(package[local + 26 : local + 28], "little")
+    assert package[start : start + 4] == b"\x01\x00\x10\x00"
+    return start
+
+
+def _with_bytes(package: bytes, at: int, value: bytes) -> bytes:
+    return package[:at] + value + package[at + len(value) :]
+
+
+def _file_size(package: bytes, name: str) -> int:
+    with zipfile.ZipFile(io.BytesIO(package)) as zf:
+        return zf.getinfo(name).file_size
+
+
+def _with_local_extra_tail(package: bytes, name: str, tail: bytes) -> bytes:
+    """``package`` with ``tail`` after the Zip64 field in ``name``'s local header."""
+    local = _local_header(package, name)
+    end = _local_zip64_field(package, name) + 20
+    data = bytearray(package[:end] + tail + package[end:])
+    extra_length = int.from_bytes(data[local + 28 : local + 30], "little")
+    data[local + 28 : local + 30] = (extra_length + len(tail)).to_bytes(2, "little")
+    return _moved_after(data, local, len(tail))
+
+
+_LOCAL_ZIP64_CHANGES: dict[str, Callable[[bytes, str], bytes]] = {
+    # One size at its maximum: a Zip64 field then holds both, so both must be.
+    "one-size-marked": lambda p, n: _with_bytes(
+        p, _local_header(p, n) + 22, _file_size(p, n).to_bytes(4, "little")
+    ),
+    "other-field-id": lambda p, n: _with_bytes(
+        p, _local_zip64_field(p, n), b"\x02\x00"
+    ),
+    "field-size-short": lambda p, n: _with_bytes(
+        p, _local_zip64_field(p, n) + 2, b"\x0c\x00"
+    ),
+    "bytes-after-the-field": lambda p, n: _with_local_extra_tail(p, n, b"\x00" * 4),
+}
+
+
+@pytest.mark.parametrize("change", list(_LOCAL_ZIP64_CHANGES))
+def test_a_local_zip64_field_other_than_its_sizes_call_for_is_not_covered(
+    change: str, docx: bytes
+) -> None:
+    package = _rewritten(docx, force_zip64=True)
+    assert detect_file(package, KEYS).verdict is Verdict.VERIFIED
+    changed = _LOCAL_ZIP64_CHANGES[change](package, "word/document.xml")
+
+    assert detect_file(changed, KEYS).verdict is Verdict.VERIFIED_WITH_UNMARKED_CONTENT
+
+
+def test_a_stream_whose_end_follows_its_data_past_a_read_verifies(
+    docx: bytes,
+) -> None:
+    """The last data byte and the stream's end arrive in different reads."""
+
+    def body(length: int) -> bytes:
+        return b"<w:document>" + b"x" * length + b"</w:document>"
+
+    def flushed(data: bytes) -> bytes:
+        stream = zlib.compressobj(0, zlib.DEFLATED, -zlib.MAX_WBITS)
+        return stream.compress(data) + stream.flush(zlib.Z_SYNC_FLUSH)
+
+    # The data fills the first read exactly; the final block is in the next.
+    length = next(
+        n
+        for n in range(files._READ_CHUNK - 200, files._READ_CHUNK)
+        if len(flushed(body(n))) == files._READ_CHUNK
+    )
+    stream = zlib.compressobj(0, zlib.DEFLATED, -zlib.MAX_WBITS)
+    raw = stream.compress(body(length)) + stream.flush(zlib.Z_SYNC_FLUSH)
+    raw += stream.flush(zlib.Z_FINISH)
+    assert len(raw) > files._READ_CHUNK
+    signed = _zip(_signed_parts(docx, {"word/document.xml": body(length)}))
+    package = _with_entry_data(signed, "word/document.xml", raw)
+
+    assert detect_file(package, KEYS).verdict is Verdict.VERIFIED
+
+
+def _descriptor_package(package: bytes) -> bytes:
+    stream = _Unseekable()
+    with (
+        zipfile.ZipFile(io.BytesIO(package)) as source,
+        zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED) as target,
+    ):
+        for info in source.infolist():
+            target.writestr(info.filename, source.read(info))
+    return bytes(stream.written)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        pytest.param(lambda local, descriptor: descriptor + 4, id="descriptor-crc"),
+        pytest.param(lambda local, descriptor: descriptor + 8, id="descriptor-size"),
+        pytest.param(lambda local, descriptor: local + 14, id="local-crc"),
+    ],
+)
+def test_a_data_descriptor_package_disagreeing_with_the_directory_is_not_covered(
+    field: Callable[[int, int], int], docx: bytes
+) -> None:
+    package = _descriptor_package(docx)
+    assert detect_file(package, KEYS).verdict is Verdict.VERIFIED
+    name = "word/document.xml"
+    _, end = _data_bounds(package, name)
+    assert package[end : end + 4] == b"PK\x07\x08"
+    data = bytearray(package)
+    data[field(_local_header(package, name), end)] ^= 0x01
+    tampered = bytes(data)
+
+    assert detect_file(tampered, KEYS).verdict is Verdict.VERIFIED_WITH_UNMARKED_CONTENT
+
+
+def test_a_checker_inflates_each_part_once(
+    docx: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = _rewritten(docx)
+    reads: collections.Counter[str] = collections.Counter()
+    entry_data = files._entry_data
+
+    def counted(
+        data: bytes,
+        zf: zipfile.ZipFile,
+        info: zipfile.ZipInfo,
+        sink: Callable[[bytes], object],
+    ) -> bool:
+        reads[info.filename] += 1
+        return entry_data(data, zf, info, sink)
+
+    monkeypatch.setattr(files, "_entry_data", counted)
+
+    assert detect_file(package, KEYS).verdict is Verdict.VERIFIED
+    # The token lookup reads the relationships and custom properties too.
+    assert reads == {
+        "word/document.xml": 1,
+        "[Content_Types].xml": 1,
+        "_rels/.rels": 2,
+        "docProps/custom.xml": 2,
+    }
 
 
 # Words that describe only a message: a file has no HTML body or markup.
