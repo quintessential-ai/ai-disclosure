@@ -83,9 +83,6 @@ MAX_FOSTER_SCANS = 1 << 24
 # cost up to the nesting depth times the document. Containers nest only when
 # content copies a labelled message.
 MAX_NESTED_CONTAINERS = 4
-# Longer than any issued token: an issued one is under 1 KiB unless its
-# ``on_behalf_of`` is exceptionally long.
-MAX_TOKEN_CHARS = 8192
 
 # Not ``s``, ``del``, ``ins``, ``sub`` or ``sup``: each changes what the text
 # says ("We <s>approve</s>", "10<sup>6</sup>") without changing the digest.
@@ -773,8 +770,6 @@ def _safelinks_target(url: str) -> str | None:
 
 def _token_mid(value: str) -> str | None:
     """The ``mid`` claim of ``value`` read as a compact JWS, unverified; else None."""
-    if len(value) > MAX_TOKEN_CHARS:
-        return None
     try:
         payload = decode_compact(value).payload
     except MalformedTokenError:

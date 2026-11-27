@@ -59,6 +59,10 @@ _ZIP64_END = b"PK\x06\x06"
 _ZIP64_LOCATOR = b"PK\x06\x07"
 _ZIP64_LOCATOR_SIZE = 20
 _DATA_DESCRIPTOR = b"PK\x07\x08"
+# A part name holds no control character (ECMA-376 Part 2, 9.1.1), C1
+# included: a part name is an IRI, whose characters start at U+00A0. A line
+# feed in one would let two ``ooxml-parts/1`` listings read the same.
+_CONTROL_CHARACTER = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
 def _pdf_name_pattern(name: str) -> bytes:
@@ -195,6 +199,10 @@ def _package_infos(zf: zipfile.ZipFile) -> dict[str, zipfile.ZipInfo]:
     if len(entries) > MAX_PACKAGE_PARTS:
         msg = f"Office package has more than {MAX_PACKAGE_PARTS} entries"
         raise ValueError(msg)
+    # ``orig_filename``: zipfile cuts ``filename`` at a NUL.
+    if any(_CONTROL_CHARACTER.search(info.orig_filename) for info in entries):
+        msg = "Office package entry name holds a control character"
+        raise ValueError(msg)
     infos = [info for info in entries if not info.is_dir()]
     by_name = {info.filename: info for info in infos}
     if len(by_name) != len(infos):
@@ -289,7 +297,8 @@ def ooxml_digest(data: bytes) -> str:
     Routing XML uses C14N 2.0 with stripped text and rewritten prefixes, after
     removing the custom-properties relationship and its content-type override.
     Each sorted part contributes ``<name>\\n<base64url SHA-256>\\n``.
-    Duplicate parts, unsafe XML and ambiguous metadata relationships are rejected.
+    Duplicate parts, a control character in an entry name, unsafe XML and
+    ambiguous metadata relationships are rejected.
     So is a package over ``MAX_PACKAGE_PARTS`` entries (directories included)
     or ``MAX_PACKAGE_BYTES`` uncompressed, with a part neither stored nor
     deflated, or with a routing or custom-properties part over
