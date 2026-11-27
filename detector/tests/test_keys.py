@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import http.client
 import ipaddress
 import json
 import math
@@ -214,6 +215,9 @@ def _certificates(directory: Path) -> tuple[Path, Path]:
 class _TlsServer:
     """An https server on 127.0.0.1 that answers every connection with ``prefix``.
 
+    ``answers``, when set before the server starts, replaces ``prefix`` with
+    one answer per connection, the last repeated.
+
     It then sends one more byte of ``drip`` every 20 ms, or closes the
     connection if ``close``. After ``LIFETIME`` seconds it closes every
     connection, so a fetch its deadline fails to end errs instead of hanging.
@@ -228,7 +232,8 @@ class _TlsServer:
         self._context.load_cert_chain(chain)
         self._listener = socket.create_server(("127.0.0.1", 0))
         self._listener.settimeout(0.02)
-        self._prefix, self._drip, self._close = prefix, drip, close
+        self.answers = [prefix]
+        self._drip, self._close = drip, close
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._serve, daemon=True)
         self.port = self._listener.getsockname()[1]
@@ -245,6 +250,7 @@ class _TlsServer:
 
     def _serve(self) -> None:
         clients: list[ssl.SSLSocket] = []
+        accepted = 0
         give_up = time.monotonic() + self.LIFETIME
         while not self._stop.is_set() and time.monotonic() < give_up:
             try:
@@ -252,7 +258,9 @@ class _TlsServer:
                 raw.settimeout(2)
                 client = self._context.wrap_socket(raw, server_side=True)
                 client.recv(65536)
-                client.sendall(self._prefix)
+                answer = self.answers[min(accepted, len(self.answers) - 1)]
+                accepted += 1
+                client.sendall(answer)
                 if self._close:
                     client.close()
                 else:
@@ -553,3 +561,115 @@ def test_fetch_takes_a_finite_positive_timeout(
     with pytest.raises(ValueError, match="more than 0 and at most 3600"):
         fetch_jwks(timeout=timeout)
     assert seen == []
+
+
+def _redirect(location: str, body: bytes = b"", code: int = 302) -> bytes:
+    head = f"HTTP/1.1 {code} Moved\r\nLocation: {location}\r\n"
+    return head.encode() + b"Content-Length: %d\r\n\r\n%s" % (len(body), body)
+
+
+@pytest.mark.parametrize("code", [301, 302, 303, 307, 308])
+def test_a_redirect_body_is_closed_unread(
+    certificates: Path, monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    """urllib reads a redirect's whole body, with no cap, unless it is closed first."""
+    body = json.dumps(golden_jwks()).encode()
+    served = b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n%s" % (len(body), body)
+    responses: list[http.client.HTTPResponse] = []
+    read: list[tuple[int, int]] = []
+    real_begin, real_read = (
+        http.client.HTTPResponse.begin,
+        http.client.HTTPResponse.read,
+    )
+
+    def begin(response: http.client.HTTPResponse) -> None:
+        real_begin(response)
+        responses.append(response)
+
+    def counting_read(
+        response: http.client.HTTPResponse, amt: int | None = None
+    ) -> bytes:
+        data = real_read(response, amt)
+        read.append((response.status, len(data)))
+        return data
+
+    monkeypatch.setattr(http.client.HTTPResponse, "begin", begin)
+    monkeypatch.setattr(http.client.HTTPResponse, "read", counting_read)
+    server = _TlsServer(certificates, b"", close=True)
+    over_the_cap = b" " * (2 * keys.MAX_JWKS_BYTES)
+    server.answers = [
+        _redirect(f"https://127.0.0.1:{server.port}/b", over_the_cap, code),
+        served,
+    ]
+
+    with server:
+        assert list(fetch_jwks(f"https://127.0.0.1:{server.port}/a", timeout=5)) == [
+            "golden-vectors"
+        ]
+
+    assert [r.status for r in responses] == [code, 200]
+    assert all(response.isclosed() for response in responses)
+    assert sum(n for status, n in read if status == code) == 0
+
+
+@pytest.mark.parametrize("location", ["https://[::1/", "https://a..b/"])
+def test_a_malformed_redirect_address_is_a_key_load_error(
+    certificates: Path, location: str
+) -> None:
+    with (
+        _TlsServer(certificates, _redirect(location), close=True) as server,
+        pytest.raises(KeyLoadError, match="redirects to an invalid address"),
+    ):
+        fetch_jwks(server.url, timeout=5)
+
+
+class _Body(BytesIO):
+    """A response body that, like http.client's, reads empty once closed."""
+
+    def read(self, size: int | None = -1) -> bytes:
+        return b"" if self.closed else super().read(size)
+
+
+def test_a_redirect_past_the_deadline_closes_its_body() -> None:
+    handler = keys._HttpsRedirectHandler(time.monotonic() - 1)
+
+    with pytest.raises(TimeoutError):
+        handler.http_error_302(
+            urllib.request.Request(URL), body := _Body(b"x"), 302, "Found", _location()
+        )
+    assert body.closed
+
+
+def test_a_redirect_to_plain_http_closes_its_body() -> None:
+    handler = keys._HttpsRedirectHandler()
+
+    with pytest.raises(KeyLoadError, match="not https"):
+        handler.http_error_302(
+            urllib.request.Request(URL),
+            body := _Body(b"x"),
+            302,
+            "Found",
+            _location("http://x.test/jwks.json"),
+        )
+    assert body.closed
+
+
+def _location(url: str = "https://x.test/jwks.json") -> HTTPMessage:
+    headers = HTTPMessage()
+    headers["Location"] = url
+    return headers
+
+
+def test_an_http_error_response_is_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    body = BytesIO(b"not found")
+    # Held here, so collecting the error cannot be what closes its body.
+    error = urllib.error.HTTPError(URL, 404, "Not Found", HTTPMessage(), body)
+
+    def not_found(*_: object, **__: object) -> FakeResponse:
+        raise error
+
+    monkeypatch.setattr(keys, "urlopen", not_found)
+
+    with pytest.raises(KeyLoadError, match="HTTP 404"):
+        fetch_jwks()
+    assert body.closed
