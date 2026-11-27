@@ -7,10 +7,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from check_key_set import DEFAULT_PATH, main
+from check_key_set import main
 from helpers import golden_jwks, golden_public_key
 
 from ai_disclosure_verify.jws import jwk_thumbprint
+from ai_disclosure_verify.keys import MAX_JWKS_BYTES
 
 
 def good_entry() -> dict[str, Any]:
@@ -27,11 +28,6 @@ def run(tmp_path: Path, document: object, capsys: pytest.CaptureFixture[str]):
     )
     code = main(["check_key_set", str(path)])
     return code, capsys.readouterr()
-
-
-def test_published_key_set_passes(capsys: pytest.CaptureFixture[str]) -> None:
-    assert main(["check_key_set", str(DEFAULT_PATH)]) == 0
-    assert "ok" in capsys.readouterr().out
 
 
 def test_empty_key_set_passes(tmp_path: Path, capsys) -> None:
@@ -153,3 +149,23 @@ def test_many_skipped_entries_are_each_named(tmp_path: Path, capsys) -> None:
     assert code == 1
     assert out.err.count("checkers would skip this entry") == 5_000
     assert "key 4999 (kid 'kid-4999')" in out.err
+
+
+def test_a_set_at_the_size_cap_passes(tmp_path: Path, capsys) -> None:
+    document = '{"keys": []}'
+    padded = document + " " * (MAX_JWKS_BYTES - len(document))
+
+    code, out = run(tmp_path, padded, capsys)
+
+    assert code == 0, out.err
+
+
+def test_a_set_over_the_size_cap_fails_unread(tmp_path: Path, capsys) -> None:
+    """Checkers refuse a fetched set over the cap, so it must not pass here."""
+    document = '{"keys": []}'
+    padded = document + " " * (MAX_JWKS_BYTES - len(document) + 1)
+
+    code, out = run(tmp_path, padded, capsys)
+
+    assert code == 1
+    assert f"larger than {MAX_JWKS_BYTES} bytes" in out.err

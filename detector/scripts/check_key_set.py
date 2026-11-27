@@ -22,6 +22,7 @@ from ai_disclosure_verify.jws import (
     keys_from_jwks,
     parse_json,
 )
+from ai_disclosure_verify.keys import MAX_JWKS_BYTES
 
 DEFAULT_PATH = (
     Path(__file__).resolve().parents[2]
@@ -91,12 +92,18 @@ def check_key_set(document: object) -> list[str]:
 def main(argv: list[str]) -> int:
     path = Path(argv[1]) if len(argv) > 1 else DEFAULT_PATH
     try:
-        # The checkers' own parser: a set they would refuse, say for a
-        # repeated member name, fails here too.
-        document = parse_json(path.read_bytes())
+        data = path.read_bytes()
     except OSError as exc:
         print(f"{path}: cannot read: {exc.strerror or exc}", file=sys.stderr)
         return 1
+    # Checkers refuse a fetched set over this size, so it fails here unparsed.
+    if len(data) > MAX_JWKS_BYTES:
+        print(f"{path}: larger than {MAX_JWKS_BYTES} bytes", file=sys.stderr)
+        return 1
+    try:
+        # The checkers' own parser: a set they would refuse, say for a
+        # repeated member name, fails here too.
+        document = parse_json(data)
     except ValueError as exc:
         print(f"{path}: not valid JSON: {exc}", file=sys.stderr)
         return 1

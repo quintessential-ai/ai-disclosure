@@ -4,9 +4,9 @@
 signed AI-disclosure markers. It is served at
 <https://ai-disclosure.complexio.com/.well-known/ai-disclosure-jwks.json>. It changes only
 through a reviewed pull request to this repository, approved by a code owner. The `Checks`
-workflow runs on every pull request and fails it if the file is not valid JWKS, a key carries a
-private `d` member, a `kid` is not the key's RFC 7638 thumbprint, a `kid` repeats, or `use` or
-`alg` is not `sig` or `EdDSA`.
+workflow runs on every pull request and fails it if the file is over the 1 MiB checkers accept,
+is not valid JWKS, a key carries a private `d` member, a `kid` is not the key's RFC 7638
+thumbprint, a `kid` repeats, or `use` or `alg` is not `sig` or `EdDSA`.
 
 ## What a key in the set means
 
@@ -14,11 +14,6 @@ Complexio vouches for every key in the set: a key here belongs to a deployment C
 operates. Key ids are opaque on purpose. A `kid` is the key's RFC 7638 thumbprint and names no
 customer, so the public set does not reveal whom we sign for. Any key in the set can sign for
 any organisation; the signed token names which (`on_behalf_of`).
-
-## Before the first key
-
-The first key goes in only once CI runs the detector tests and the key-set check on every pull
-request.
 
 ## Adding a deployment's key, before its first signed mail
 

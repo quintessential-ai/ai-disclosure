@@ -28,7 +28,6 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from helpers import FakeResponse, golden_jwks
 
 from ai_disclosure_verify import keys
-from ai_disclosure_verify.jws import jwk_thumbprint, keys_from_jwks, parse_json
 from ai_disclosure_verify.keys import KeyLoadError, fetch_jwks, load_jwks_file
 
 URL = keys.DEFAULT_JWKS_URL
@@ -504,52 +503,6 @@ def test_a_local_key_set_is_parsed_strictly(tmp_path: Path) -> None:
 
     with pytest.raises(KeyLoadError, match="not valid JSON"):
         load_jwks_file(path)
-
-
-PUBLISHED = Path(__file__).resolve().parents[2] / "public/.well-known"
-
-
-def published_key_problems(document: object) -> list[str]:
-    """Why a key set may not be published: KEYS.md's rules for each entry."""
-    if not isinstance(document, dict) or not isinstance(document.get("keys"), list):
-        return ["not a JWKS document"]
-    problems = []
-    usable = keys_from_jwks(document)
-    for index, entry in enumerate(document["keys"]):
-        kid = entry.get("kid") if isinstance(entry, dict) else None
-        key = usable.get(kid) if isinstance(kid, str) else None
-        if key is None:
-            problems.append(f"key {index} is not a usable Ed25519 entry with a kid")
-        elif kid != jwk_thumbprint(key):
-            problems.append(f"key {index}'s kid is not its RFC 7638 thumbprint")
-        elif entry.get("use") != "sig" or entry.get("alg") != "EdDSA":
-            problems.append(f"key {index} lacks use: sig and alg: EdDSA")
-    return problems
-
-
-def test_the_published_key_set_follows_the_publishing_rules() -> None:
-    """A verifier treats a kid as a name; publishing holds it to the thumbprint."""
-    path = PUBLISHED / "ai-disclosure-jwks.json"
-    document = parse_json(path.read_text(encoding="utf-8"))
-
-    assert published_key_problems(document) == []
-
-
-def test_the_publishing_rules_catch_a_named_kid() -> None:
-    entry = golden_jwks()["keys"][0]
-    thumbprint = jwk_thumbprint(keys_from_jwks(golden_jwks())["golden-vectors"])
-
-    assert published_key_problems({"keys": [{**entry, "kid": thumbprint}]}) == []
-    assert published_key_problems(golden_jwks()) == [
-        "key 0's kid is not its RFC 7638 thumbprint"
-    ]
-    without_use = {k: v for k, v in entry.items() if k != "use"}
-    assert published_key_problems({"keys": [{**without_use, "kid": thumbprint}]}) == [
-        "key 0 lacks use: sig and alg: EdDSA"
-    ]
-    assert published_key_problems({"keys": [{**entry, "use": "enc"}]}) == [
-        "key 0 is not a usable Ed25519 entry with a kid"
-    ]
 
 
 @pytest.mark.parametrize("timeout", [0, -1, math.inf, math.nan, 3601])
