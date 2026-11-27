@@ -10,6 +10,7 @@ line per problem otherwise. The rules are those of KEYS.md.
 from __future__ import annotations
 
 import sys
+from collections import Counter
 from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -32,8 +33,12 @@ DEFAULT_PATH = (
 
 def seen_twice(entries: list[object]) -> set[str]:
     """The ``kid`` values that more than one entry carries."""
-    kids = [e.get("kid") for e in entries if isinstance(e, dict)]
-    return {k for k in kids if isinstance(k, str) and kids.count(k) > 1}
+    counts = Counter(
+        kid
+        for entry in entries
+        if isinstance(entry, dict) and isinstance(kid := entry.get("kid"), str)
+    )
+    return {kid for kid, count in counts.items() if count > 1}
 
 
 def check_key_set(document: object) -> list[str]:
@@ -46,6 +51,7 @@ def check_key_set(document: object) -> list[str]:
 
     problems: list[str] = []
     seen: set[str] = set()
+    repeated = seen_twice(document["keys"])
     for index, entry in enumerate(document["keys"]):
         if not isinstance(entry, dict):
             problems.append(f"key {index}: not a JSON object")
@@ -74,7 +80,7 @@ def check_key_set(document: object) -> list[str]:
         except (KeyError, TypeError, ValueError):
             problems.append(f"{name}: 'x' is not a canonical Ed25519 public key")
             continue
-        if kid not in keys and kid not in seen_twice(document["keys"]):
+        if kid not in keys and kid not in repeated:
             problems.append(f"{name}: checkers would skip this entry")
         expected = jwk_thumbprint(public)
         if kid != expected:

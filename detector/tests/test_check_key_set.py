@@ -115,3 +115,41 @@ def test_json_checkers_refuse_fails(tmp_path: Path, capsys, raw: str) -> None:
     code, out = run(tmp_path, raw, capsys)
     assert code == 1
     assert "not valid JSON" in out.err
+
+
+def test_entry_checkers_would_skip_fails(tmp_path: Path, capsys) -> None:
+    """Well formed, but a checker skips a key it may not use to verify."""
+    entry = good_entry() | {"key_ops": ["sign"]}
+    code, out = run(tmp_path, {"keys": [entry]}, capsys)
+    assert code == 1
+    (problem,) = out.err.splitlines()
+    assert problem.endswith(
+        f"key 0 (kid {entry['kid']!r}): checkers would skip this entry"
+    )
+
+
+def test_missing_kid_fails(tmp_path: Path, capsys) -> None:
+    entry = good_entry()
+    del entry["kid"]
+    code, out = run(tmp_path, {"keys": [entry]}, capsys)
+    assert code == 1
+    assert "key 0 (kid None): missing 'kid'" in out.err
+
+
+def test_non_object_entry_fails(tmp_path: Path, capsys) -> None:
+    code, out = run(tmp_path, {"keys": [good_entry(), 1]}, capsys)
+    assert code == 1
+    assert "key 1: not a JSON object" in out.err
+    assert "key 0" not in out.err
+
+
+def test_many_skipped_entries_are_each_named(tmp_path: Path, capsys) -> None:
+    """Each entry is checked against the set once, not against every other."""
+    entry = good_entry() | {"use": "enc"}
+    document = {"keys": [entry | {"kid": f"kid-{i}"} for i in range(5_000)]}
+
+    code, out = run(tmp_path, document, capsys)
+
+    assert code == 1
+    assert out.err.count("checkers would skip this entry") == 5_000
+    assert "key 4999 (kid 'kid-4999')" in out.err
