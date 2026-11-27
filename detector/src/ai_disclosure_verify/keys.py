@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import importlib.metadata
-import threading
+import math
+import ssl
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -16,13 +18,16 @@ from ai_disclosure_verify.jws import keys_from_jwks, parse_json
 if TYPE_CHECKING:
     from http.client import HTTPMessage
 
+    from _typeshed import WriteableBuffer
+
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 # Where the published key set is served. The one place the address lives.
 DEFAULT_JWKS_URL = (
     "https://ai-disclosure.complexio.com/.well-known/ai-disclosure-jwks.json"
 )
-# The whole fetch, redirects and reading included, must finish within this.
+# The fetch after name resolution, redirects and reading included, must
+# finish within this.
 FETCH_TIMEOUT_SECONDS = 10.0
 
 
@@ -61,8 +66,10 @@ def fetch_jwks(
 ) -> dict[str, Ed25519PublicKey]:
     """Fetch the key set over HTTPS: one attempt, no retries, no caching.
 
-    Every redirect must stay on https, and the whole fetch must finish within
-    ``timeout`` seconds.
+    Every redirect must stay on https, and the fetch must finish within
+    ``timeout`` seconds. Name resolution is left to the system resolver's
+    own timeout: only a thread could bound it, and that thread would outlive
+    the call.
     """
     if not _is_https(url):
         msg = f"the key set address {url} is not https"
@@ -90,7 +97,10 @@ def _is_https(url: str) -> bool:
 
 
 class _HttpsRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Follows a redirect only to another https address."""
+    """Follows a redirect only to another https address, and only before ``deadline``."""
+
+    def __init__(self, deadline: float = math.inf) -> None:
+        self._deadline = deadline
 
     def redirect_request(
         self,
@@ -105,10 +115,41 @@ class _HttpsRedirectHandler(urllib.request.HTTPRedirectHandler):
             fp.close()
             message = f"the key set at {req.full_url} redirects to {newurl}, not https"
             raise KeyLoadError(message)
+        _remaining(self._deadline)
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-_OPENER = urllib.request.build_opener(_HttpsRedirectHandler)
+def _remaining(deadline: float) -> float:
+    """Seconds left before ``deadline`` (``time.monotonic``); TimeoutError when none."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        msg = "timed out"
+        raise TimeoutError(msg)
+    return remaining
+
+
+def _tls_context(deadline: float) -> ssl.SSLContext:
+    """The default TLS context, with every read on its sockets ending by ``deadline``.
+
+    A per-read timeout alone lets a server that sends a byte at a time hold
+    the fetch open for ever; the status line and headers are read through
+    the same sockets, so they are bounded too.
+    """
+
+    class _Socket(ssl.SSLSocket):
+        def recv(self, buflen: int = 1024, flags: int = 0) -> bytes:
+            self.settimeout(_remaining(deadline))
+            return super().recv(buflen, flags)
+
+        def recv_into(
+            self, buffer: WriteableBuffer, nbytes: int | None = None, flags: int = 0
+        ) -> int:
+            self.settimeout(_remaining(deadline))
+            return super().recv_into(buffer, nbytes, flags)
+
+    context = ssl.create_default_context()
+    context.sslsocket_class = _Socket
+    return context
 
 
 class _Response(Protocol):
@@ -118,44 +159,31 @@ class _Response(Protocol):
     def read(self, amt: int, /) -> bytes: ...
 
 
-def urlopen(request: urllib.request.Request, timeout: float) -> _Response:
-    """Open ``request`` following https redirects only; tests replace this."""
-    return _OPENER.open(request, timeout=timeout)
+def urlopen(request: urllib.request.Request, deadline: float) -> _Response:
+    """Open ``request`` following https redirects only, by ``deadline``; tests replace this.
+
+    ``deadline`` is a ``time.monotonic`` value. Every read, and the TLS
+    handshake, ends by it.
+    """
+    opener = urllib.request.build_opener(
+        _HttpsRedirectHandler(deadline),
+        urllib.request.HTTPSHandler(context=_tls_context(deadline)),
+    )
+    return opener.open(request, timeout=_remaining(deadline))
 
 
 def _fetch_within(url: str, timeout: float) -> bytes:
     """The response body, or ``KeyLoadError`` if it is not read within ``timeout``.
 
-    The socket timeout bounds each read, not the fetch: name resolution is
-    not covered, and a server can send a byte at a time. So the fetch runs on
-    a daemon thread that is abandoned at the deadline.
+    No thread is involved: on a timeout nothing of the fetch keeps running.
     """
-    outcome: list[bytes | Exception] = []
-
-    def fetch() -> None:
-        try:
-            outcome.append(_get(url, timeout))
-        except Exception as exc:  # re-raised on the caller's thread
-            outcome.append(exc)
-
-    worker = threading.Thread(target=fetch, name="ai-disclosure-jwks", daemon=True)
-    worker.start()
-    worker.join(timeout)
-    if not outcome:
-        msg = f"could not fetch the key set from {url} within {timeout:g}s ({_HINT})"
-        raise KeyLoadError(msg)
-    if isinstance(outcome[0], Exception):
-        raise outcome[0]
-    return outcome[0]
-
-
-def _get(url: str, timeout: float) -> bytes:
+    deadline = time.monotonic() + timeout
     request = urllib.request.Request(  # noqa: S310 - https checked by the caller
         url,
         headers={"Accept": "application/json", "User-Agent": _user_agent()},
     )
     try:
-        with urlopen(request, timeout=timeout) as response:
+        with urlopen(request, deadline) as response:
             final = response.geturl()
             if not _is_https(final):
                 msg = f"the key set at {url} was served from {final}, not https"

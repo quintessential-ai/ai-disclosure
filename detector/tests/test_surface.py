@@ -28,6 +28,7 @@ from ai_disclosure_verify import (
     Verdict,
     cli,
 )
+from ai_disclosure_verify.canonical import MAX_DOCUMENT_BYTES
 from ai_disclosure_verify.detect import (
     VERDICT_MEANING,
     ContentCheck,
@@ -462,6 +463,22 @@ def test_the_json_report_is_ascii(
     assert json.loads(out)["findings"][0]["claims"]["on_behalf_of"] == _FORGED
 
 
+@pytest.mark.parametrize("value", ["", "   "])
+def test_an_empty_disclosure_header_is_a_marker_attempt(value: str) -> None:
+    raw = (
+        "From: sender@example.test\r\n"
+        f"X-Complexio-AI-Disclosure:{value}\r\n"
+        "Content-Type: text/html\r\n\r\n<p>Payment is due.</p>\r\n"
+    ).encode()
+
+    report = detect_message(raw, KEYS)
+
+    assert report.verdict is Verdict.UNVERIFIED
+    (finding,) = report.findings
+    assert finding.carrier is Carrier.HEADER
+    assert finding.error is not None
+
+
 # ---------------------------------------------------------------------------
 # Telling file types apart
 # ---------------------------------------------------------------------------
@@ -502,6 +519,48 @@ def test_a_fragment_starting_with_text_is_read_as_html(
     # Text before the container: the marker is found, but is not this one's own.
     assert report.verdict is Verdict.QUOTED_ONLY
     assert report.findings[0].carrier is Carrier.BODY
+
+
+@pytest.mark.parametrize(
+    "first_lines",
+    ["Note: what I received\n", "Payment: due\n\n", "From me, unedited\n"],
+    ids=["header-like", "header-like-then-blank", "mbox-like"],
+)
+def test_a_fragment_starting_with_a_header_like_line_is_read_as_html(
+    signed: tuple[str, str], first_lines: str
+) -> None:
+    body, _ = signed
+    data = f"{first_lines}{body}".encode()
+
+    report = detect_file(data, KEYS)
+
+    assert report.to_dict() == detect_html(data.decode(), KEYS).to_dict()
+    assert report.verdict is Verdict.QUOTED_ONLY
+
+
+def test_an_unreadable_fragment_holding_a_marker_is_not_no_marker() -> None:
+    padding = "<p>x</p>" * (MAX_DOCUMENT_BYTES // 8)
+    data = f'Note: long\n<div data-ai-disclosure="x"></div>{padding}'.encode()
+
+    assert detect_file(data, KEYS).verdict is Verdict.UNPARSEABLE
+
+
+def test_a_message_with_an_html_body_is_not_read_again(
+    signed: tuple[str, str],
+) -> None:
+    body, _ = signed
+    message = EmailMessage()
+    message["Subject"] = "Forwarded"
+    message.set_content("<p>See the attachment.</p>", subtype="html")
+    message.add_attachment(body, subtype="html", filename="earlier.html")
+
+    assert detect_file(bytes(message), KEYS).verdict is Verdict.NONE
+
+
+def test_a_message_with_markup_but_no_marker_has_no_marker() -> None:
+    data = b"Subject: hello\r\n\r\nPlease read <b>this</b>.\r\n"
+
+    assert detect_file(data, KEYS).verdict is Verdict.NONE
 
 
 def test_a_message_mentioning_a_pdf_header_is_still_a_message(

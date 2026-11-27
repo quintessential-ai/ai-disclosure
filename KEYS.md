@@ -8,6 +8,13 @@ workflow runs on every pull request and fails it if the file is not valid JWKS, 
 private `d` member, a `kid` is not the key's RFC 7638 thumbprint, a `kid` repeats, or `use` or
 `alg` is not `sig` or `EdDSA`.
 
+## What a key in the set means
+
+Complexio vouches for every key in the set: a key here belongs to a deployment Complexio
+operates. Key ids are opaque on purpose. A `kid` is the key's RFC 7638 thumbprint and names no
+customer, so the public set does not reveal whom we sign for. The signed token names the
+organisation (`on_behalf_of`).
+
 ## Adding a deployment's key, before its first signed mail
 
 1. Generate an Ed25519 key for the deployment and store the private key as that deployment's
@@ -23,8 +30,9 @@ private `d` member, a `kid` is not the key's RFC 7638 thumbprint, a `kid` repeat
 
 ## Rotating a key
 
-Add the new key first and enable it. Keep the old key in the set for as long as mail it signed
-may need checking; removing it makes that mail stop verifying.
+Add the new key first and enable it. Keep the retired key in the set, so mail it signed still
+checks; removing it makes that mail stop verifying. A key has no validity period: detectors do
+not check a token's `iat` against when the key was in use.
 
 ## A compromised key
 

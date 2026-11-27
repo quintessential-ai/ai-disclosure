@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 from collections.abc import Mapping
 from typing import Any
 
@@ -142,6 +143,31 @@ def test_only_the_canonical_last_signature_character_verifies() -> None:
 def test_parse_json_refuses_what_rfc_8259_leaves_open(text: str) -> None:
     with pytest.raises(ValueError):
         parse_json(text)
+
+
+def test_parse_json_refuses_json_nested_past_its_cap() -> None:
+    # Python's own limit differs between versions (3.14 reads 50,000 levels).
+    for deep in ("[" * 33 + "]" * 33, '{"a":' * 33 + "1" + "}" * 33):
+        with pytest.raises(ValueError, match="nested more than 32 deep"):
+            parse_json(deep)
+    with pytest.raises(ValueError, match="nested more than 32 deep"):
+        parse_json("[" * 50_000 + "]" * 50_000)
+    assert parse_json("[" * 32 + "]" * 32) is not None
+
+
+def test_brackets_inside_strings_do_not_count() -> None:
+    text = '{"a":"' + "[" * 40 + '\\"{"}'
+
+    assert parse_json(text) == {"a": "[" * 40 + '"{'}
+
+
+def test_an_unterminated_string_is_refused_in_linear_time() -> None:
+    text = '{"a":"' + '\\"' * 50_000
+
+    started = time.monotonic()
+    with pytest.raises(ValueError):
+        parse_json(text)
+    assert time.monotonic() - started < 0.5
 
 
 def test_parse_json_reads_utf8_bytes_only() -> None:
