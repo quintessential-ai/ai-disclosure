@@ -10,9 +10,13 @@ permissions:
 
 jobs:
   detector:
-    name: Tests and key set
+    name: Tests and key set (Python ${{ matrix.python }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.14"]
     defaults:
       run:
         working-directory: detector
@@ -24,7 +28,9 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: detector/uv.lock
+          python-version: ${{ matrix.python }}
       - name: Tests
         run: uv run --locked pytest
       - name: Published key set
+        if: matrix.python == '3.12'
         run: uv run --locked python scripts/check_key_set.py
