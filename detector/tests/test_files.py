@@ -23,8 +23,8 @@ from helpers import (
 )
 
 from ai_disclosure_verify import Carrier, ContentCheck, Verdict, cli, files
-from ai_disclosure_verify.detect import MessageDecodeError, detect_file
-from ai_disclosure_verify.jws import decode_compact
+from ai_disclosure_verify.detect import MessageDecodeError, detect_file, detect_html
+from ai_disclosure_verify.jws import b64url_encode, decode_compact
 
 # Written by fixtures/generate_fixtures.py with the reference implementation.
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -672,6 +672,98 @@ def test_a_file_signature_past_the_first_1024_bytes_is_not_ambiguous(
     data = b"Note: x\n" + b"a" * 1024 + b" " + signature + b"\n"
 
     assert detect_file(data).verdict is Verdict.NONE
+
+
+@pytest.mark.parametrize(
+    ("prefix", "fixture"),
+    [
+        (b"see %PDF- spec\n", "signed.docx"),
+        (b"Note: see %PDF- spec\n", "signed.docx"),
+        # Read as the PDF alone, the marker would be found.
+        (b"see PK\x03\x04 spec\n", "signed.pdf"),
+    ],
+    ids=["text", "header-led", "zip-named-before-a-pdf"],
+)
+def test_a_file_behind_text_naming_the_other_signature_is_unreadable(
+    prefix: bytes, fixture: str, tmp_path: Path
+) -> None:
+    data = prefix + (FIXTURES / fixture).read_bytes()
+
+    with pytest.raises(MessageDecodeError, match="remove the text before the file"):
+        detect_file(data, KEYS)
+    path = tmp_path / "input.docx"
+    path.write_bytes(data)
+    assert cli.main([str(path), "--offline"]) == cli.EXIT_ERROR
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        pytest.param(_PDF.replace(b"\n1 0 obj", b"\n% PK\x03\x04\n1 0 obj"), id="pdf"),
+        pytest.param(b"PK\x03\x04%PDF-", id="zip"),
+    ],
+)
+def test_a_file_carrying_both_signatures_up_front_is_unreadable(data: bytes) -> None:
+    with pytest.raises(MessageDecodeError, match="remove the text before the file"):
+        detect_file(data)
+
+
+@pytest.mark.parametrize("fixture", ["signed.pdf", "signed.docx"], ids=["pdf", "docx"])
+def test_a_signed_file_alone_still_verifies(fixture: str) -> None:
+    verdict = detect_file((FIXTURES / fixture).read_bytes(), KEYS).verdict
+
+    assert verdict in {Verdict.VERIFIED, Verdict.VERIFIED_WITH_UNMARKED_CONTENT}
+
+
+@pytest.mark.parametrize("alg", [["EdDSA"], {"x": 1}], ids=["array", "object"])
+def test_an_alg_that_is_not_a_string_is_a_rejected_token(
+    alg: object, tmp_path: Path
+) -> None:
+    def part(value: object) -> str:
+        return b64url_encode(json.dumps(value).encode())
+
+    token = ".".join(
+        [part({"alg": alg, "typ": "ai-disclosure+jwt"}), part({"spec": "x"}), ""]
+    )
+    html = f'<div data-ai-disclosure="{token}"></div><p>x</p>'
+
+    (finding,) = detect_html(html).findings
+    assert finding.error is not None
+    assert finding.error.startswith("unsupported alg")
+    path = tmp_path / "body.html"
+    path.write_text(html)
+    assert cli.main([str(path), "--offline"]) == cli.EXIT_UNVERIFIED
+
+
+def test_text_naming_a_signature_before_a_signed_fragment_reads_the_fragment(
+    vectors: dict[str, Any],
+) -> None:
+    body, _ = signed_vector_body(vectors["signed_as_written"][0])
+
+    report = detect_file(f"see %PDF- spec\n{body}".encode(), KEYS)
+
+    # Read as HTML: the marker verifies, and the text before it reads as quoted.
+    assert report.verdict is Verdict.QUOTED_ONLY
+    (finding,) = report.findings
+    assert finding.carrier is Carrier.BODY
+    assert finding.verified
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        pytest.param(b"see %PDF- spec\n<p>Hello</p>", id="unmarked-fragment"),
+        pytest.param(b"junk\n" + _PDF, id="unmarked-pdf-behind-bytes"),
+    ],
+)
+def test_a_signature_behind_text_with_no_marker_is_unreadable(
+    data: bytes, tmp_path: Path
+) -> None:
+    with pytest.raises(MessageDecodeError, match="remove the text before the file"):
+        detect_file(data)
+    path = tmp_path / "input.bin"
+    path.write_bytes(data)
+    assert cli.main([str(path), "--offline"]) == cli.EXIT_ERROR
 
 
 def test_a_header_led_message_without_a_file_signature_has_no_marker(

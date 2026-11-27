@@ -862,20 +862,27 @@ this order:
 2. After a UTF-8 byte-order mark and ASCII whitespace, `<` is an HTML body,
    and a header field (a name of printable ASCII characters other than `:`,
    then `:`, or an mbox `From ` line) is a message, read from that point.
-3. `%PDF-` within the first 1024 bytes is a PDF, as PDF readers accept;
-   failing that, a zip signature within them is an Office file.
+3. `%PDF-` (failing that, a zip signature) within the first 1024 bytes,
+   not at the start, is read as that file; if it holds no marker, the input
+   is read as an HTML body when it holds a tag; if neither finds a marker,
+   the input is ambiguous and is reported as unreadable (exit status 2).
 4. A tag anywhere (`<` followed by an ASCII letter, `/` or `!`) is an HTML
    body, such as a fragment that starts with text.
 5. Anything else is a message.
+
+If the first 1024 bytes hold both `%PDF-` and `PK\x03\x04`, the input is
+ambiguous and is reported as unreadable (exit status 2).
 
 A fragment whose first line looks like a header field (`Note: …`) is read
 as a message first. When that message has no HTML body and no marker, the
 input is read again as an HTML body when it holds a tag, reported if it
 finds a marker, or if it is `unparseable` and the input holds
-`data-ai-disclosure`. If neither reading finds a marker and the input's
-first 1024 bytes hold `%PDF-` or `PK\x03\x04`, the input is ambiguous and
-is reported as unreadable (exit status 2): a PDF or Office file with text in
-front of it is checked once that text is removed. So the guess never
+`data-ai-disclosure`. If neither reading finds a marker and `%PDF-` or
+`PK\x03\x04` occurs within the input's first 1024 bytes, the input is
+ambiguous and is reported as unreadable (exit status 2): a PDF or Office
+file with text in front of it is checked once that text is removed. A
+message that only quotes a file signature, in its subject or text, is
+reported the same way. So the guess never
 turns a marked file or fragment into `no_marker`; the fragment's first line
 is text before its container, so its marker reads as quoted. A message whose
 MIME parts nest too deeply for the parser is reported as unreadable (exit status
