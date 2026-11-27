@@ -68,8 +68,9 @@ An Office file's label covers its parts. Every other byte of the file belongs to
 records, which hold no comment, no extra field other than Zip64's, and no directory entry, and
 each part's data is one stream of the sizes its records declare. Any other byte (text appended
 after the end of the file, a zip or entry comment, an extra field, a directory entry, or bytes
-between its entries) is not covered, and the file reads `verified_with_unmarked_content`
-(exit status 4).
+between its entries) is not covered, and so is a local record that disagrees with the central
+directory: the file reads `verified_with_unmarked_content` (exit status 4). A package whose end
+records name a disk other than 0 or miscount its entries cannot be read (exit status 2).
 
 Until a deployment's signing key is published in the key set, its labels are unsigned, and
 every check of its mail reads `ai_marked_unverified`.

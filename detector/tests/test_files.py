@@ -1114,6 +1114,62 @@ def test_a_package_written_with_data_descriptors_is_covered(docx: bytes) -> None
     assert files.ooxml_uncovered(repacked) is False
 
 
+def _streamed(package: bytes, *, force_zip64: bool = False) -> bytes:
+    """``package`` written to a stream zipfile cannot seek in: all with descriptors."""
+    stream = _Unseekable()
+    with (
+        zipfile.ZipFile(io.BytesIO(package)) as source,
+        zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED) as target,
+    ):
+        for info in source.infolist():
+            with target.open(info.filename, "w", force_zip64=force_zip64) as part:
+                part.write(source.read(info))
+    return bytes(stream.written)
+
+
+def _descriptor_resized(package: bytes, name: str, width: int) -> bytes:
+    """``package`` with ``name``'s data descriptor written with ``width``-byte sizes."""
+    with zipfile.ZipFile(io.BytesIO(package)) as zf:
+        info = zf.getinfo(name)
+    _start, end = _data_bounds(package, name)
+    assert package[end : end + 4] == b"PK\x07\x08"
+    local = info.header_offset
+    # The local header's Zip64 field, not the directory's, says how wide they are.
+    old_width = 8 if package[local + 28 : local + 30] != b"\x00\x00" else 4
+    descriptor = (
+        b"PK\x07\x08"
+        + info.CRC.to_bytes(4, "little")
+        + info.compress_size.to_bytes(width, "little")
+        + info.file_size.to_bytes(width, "little")
+    )
+    data = bytearray(package[:end] + descriptor + package[end + 8 + 2 * old_width :])
+    return _moved_after(data, local, 2 * (width - old_width))
+
+
+@pytest.mark.parametrize(
+    ("force_zip64", "width", "verdict"),
+    [
+        pytest.param(True, 8, Verdict.VERIFIED, id="zip64-entry-8-byte"),
+        pytest.param(
+            True, 4, Verdict.VERIFIED_WITH_UNMARKED_CONTENT, id="zip64-entry-4-byte"
+        ),
+        pytest.param(False, 4, Verdict.VERIFIED, id="entry-4-byte"),
+        pytest.param(
+            False, 8, Verdict.VERIFIED_WITH_UNMARKED_CONTENT, id="entry-8-byte"
+        ),
+    ],
+)
+def test_a_data_descriptor_has_the_width_its_entry_calls_for(
+    force_zip64: bool, width: int, verdict: Verdict, docx: bytes
+) -> None:
+    """APPNOTE 4.3.9.2: 8-byte sizes exactly when the entry has a Zip64 field."""
+    package = _descriptor_resized(
+        _streamed(docx, force_zip64=force_zip64), "word/document.xml", width
+    )
+
+    assert detect_file(package, KEYS).verdict is verdict
+
+
 def test_a_signed_package_alone_is_covered(docx: bytes) -> None:
     assert files.ooxml_uncovered(docx) is False
     assert detect_file(docx, KEYS).verdict is Verdict.VERIFIED
@@ -1329,6 +1385,41 @@ def test_a_local_header_disagreeing_with_the_directory_is_not_covered(
     )
 
 
+@pytest.mark.parametrize(
+    ("offset", "changed"),
+    [
+        pytest.param(8, lambda _held: zipfile.ZIP_STORED, id="stored-for-deflated"),
+        pytest.param(6, lambda held: held | 0x1, id="encrypted"),
+        pytest.param(6, lambda held: held | 0x8, id="data-descriptor"),
+    ],
+)
+def test_a_local_method_or_flag_other_than_the_directorys_is_not_covered(
+    offset: int,
+    changed: Callable[[int], int],
+    docx: bytes,
+    jwks_file: Path,
+    tmp_path: Path,
+) -> None:
+    """zipfile reads an entry by the directory's method and flags, not the local."""
+    package = _rewritten(docx)
+    local = _local_header(package, "word/document.xml")
+    data = bytearray(package)
+    held = int.from_bytes(data[local + offset : local + offset + 2], "little")
+    assert int.from_bytes(data[local + 8 : local + 10], "little") == (
+        zipfile.ZIP_DEFLATED
+    )
+    data[local + offset : local + offset + 2] = changed(held).to_bytes(2, "little")
+    tampered = bytes(data)
+    assert tampered != package
+
+    assert detect_file(tampered, KEYS).verdict is Verdict.VERIFIED_WITH_UNMARKED_CONTENT
+    assert files.ooxml_uncovered(tampered, streams_complete=True) is True
+    assert (
+        _cli(tmp_path, "input.docx", tampered, jwks_file)
+        == cli.EXIT_VERIFIED_WITH_UNMARKED_CONTENT
+    )
+
+
 def _with_local_name(package: bytes, name: str, local_name: bytes) -> bytes:
     """``package`` with ``name``'s local header, not its central one, renamed."""
     local = _local_header(package, name)
@@ -1407,6 +1498,150 @@ def test_a_zip64_end_record_holds_only_its_fixed_fields(
     package = _with_zip64_end(docx, extensible)
 
     assert detect_file(package, KEYS).verdict is verdict
+
+
+def _with_end_field(package: bytes, at: int, width: int, change: int) -> bytes:
+    """``package`` with the ``width``-byte field at ``at`` moved by ``change``."""
+    data = bytearray(package)
+    field = slice(at, at + width)
+    data[field] = (int.from_bytes(data[field], "little") + change).to_bytes(
+        width, "little"
+    )
+    return bytes(data)
+
+
+@pytest.mark.parametrize(
+    ("at", "change"),
+    [
+        pytest.param(4, 1, id="disk"),
+        pytest.param(6, 1, id="directory-disk"),
+        pytest.param(8, 1, id="entries-on-disk-one-more"),
+        pytest.param(8, -1, id="entries-on-disk-one-fewer"),
+        pytest.param(10, 1, id="entries-one-more"),
+        pytest.param(10, -1, id="entries-one-fewer"),
+    ],
+)
+def test_an_end_record_naming_another_disk_or_miscounting_is_refused(
+    at: int, change: int, docx: bytes, jwks_file: Path, tmp_path: Path
+) -> None:
+    """zipfile reads the directory by its size, so neither field is read."""
+    tampered = _with_end_field(docx, _eocd(docx) + at, 2, change)
+
+    with pytest.raises(MessageDecodeError, match="end record"):
+        detect_file(tampered, KEYS)
+    assert _cli(tmp_path, "input.docx", tampered, jwks_file) == cli.EXIT_ERROR
+    with pytest.raises(ValueError, match="end record"):
+        files.ooxml_digest(tampered)
+
+
+@pytest.mark.parametrize(
+    ("at", "width", "change"),
+    [
+        pytest.param(16, 4, 1, id="disk"),
+        pytest.param(20, 4, 1, id="directory-disk"),
+        pytest.param(24, 8, 1, id="entries-on-disk"),
+        pytest.param(32, 8, -1, id="entries"),
+    ],
+)
+def test_a_zip64_end_record_naming_another_disk_or_miscounting_is_refused(
+    at: int, width: int, change: int, docx: bytes, jwks_file: Path, tmp_path: Path
+) -> None:
+    package = _with_zip64_end(docx, b"")
+    record = package.rindex(b"PK\x06\x06")
+    tampered = _with_end_field(package, record + at, width, change)
+
+    with pytest.raises(MessageDecodeError, match="end record"):
+        detect_file(tampered, KEYS)
+    assert _cli(tmp_path, "input.docx", tampered, jwks_file) == cli.EXIT_ERROR
+
+
+def _with_central_disk(package: bytes, disk: int, deferred: int | None) -> bytes:
+    """``package``'s first central record on ``disk``, with ``deferred`` in Zip64.
+
+    No Zip64 field is added when ``deferred`` is None.
+    """
+    central = _cd_bounds(package)[0]
+    name_length = int.from_bytes(package[central + 28 : central + 30], "little")
+    assert package[central + 30 : central + 32] == b"\x00\x00"
+    field = (
+        b""
+        if deferred is None
+        else _extra_field(0x0001, deferred.to_bytes(4, "little"))
+    )
+    record = bytearray(package[central : central + 46 + name_length])
+    record[34:36] = disk.to_bytes(2, "little")
+    record[30:32] = len(field).to_bytes(2, "little")
+    data = bytearray(
+        package[:central] + record + field + package[central + 46 + name_length :]
+    )
+    eocd = _eocd(bytes(data))
+    cd_size = int.from_bytes(data[eocd + 12 : eocd + 16], "little") + len(field)
+    data[eocd + 12 : eocd + 16] = cd_size.to_bytes(4, "little")
+    return bytes(data)
+
+
+@pytest.mark.parametrize(
+    ("disk", "deferred"),
+    [
+        pytest.param(1, None, id="disk-1"),
+        pytest.param(0xFFFF, 1, id="disk-1-in-zip64-field"),
+    ],
+)
+def test_an_entry_on_another_disk_is_refused(
+    disk: int, deferred: int | None, docx: bytes, jwks_file: Path, tmp_path: Path
+) -> None:
+    package = _with_central_disk(docx, disk, deferred)
+
+    with pytest.raises(MessageDecodeError, match="disk other than 0"):
+        detect_file(package, KEYS)
+    assert _cli(tmp_path, "input.docx", package, jwks_file) == cli.EXIT_ERROR
+
+
+def test_an_entry_disk_deferred_to_a_zip64_field_holding_0_verifies(
+    docx: bytes,
+) -> None:
+    package = _with_central_disk(docx, 0xFFFF, 0)
+
+    assert detect_file(package, KEYS).verdict is Verdict.VERIFIED
+
+
+def test_a_zip64_locator_counting_other_than_one_disk_is_refused(
+    docx: bytes, jwks_file: Path, tmp_path: Path
+) -> None:
+    # zipfile itself refuses a locator naming another disk or more than one.
+    package = _with_zip64_end(docx, b"")
+    locator = package.rindex(b"PK\x06\x07")
+    tampered = _with_end_field(package, locator + 16, 4, -1)
+
+    with pytest.raises(MessageDecodeError, match="end record"):
+        detect_file(tampered, KEYS)
+    assert _cli(tmp_path, "input.docx", tampered, jwks_file) == cli.EXIT_ERROR
+
+
+@pytest.mark.parametrize(
+    ("at", "value", "verdict"),
+    [
+        pytest.param(12, 0, Verdict.VERIFIED_WITH_UNMARKED_CONTENT, id="size-zero"),
+        pytest.param(16, 0, Verdict.VERIFIED_WITH_UNMARKED_CONTENT, id="offset-zero"),
+        pytest.param(12, 0xFFFFFFFF, Verdict.VERIFIED, id="size-deferred"),
+        pytest.param(16, 0xFFFFFFFF, Verdict.VERIFIED, id="offset-deferred"),
+    ],
+)
+def test_an_end_record_directory_field_agrees_with_the_zip64_one(
+    at: int, value: int, verdict: Verdict, docx: bytes, jwks_file: Path, tmp_path: Path
+) -> None:
+    """Each end record field holds the Zip64 record's value or the mark deferring."""
+    package = bytearray(_with_zip64_end(docx, b""))
+    eocd = _eocd(bytes(package))
+    package[eocd + at : eocd + at + 4] = value.to_bytes(4, "little")
+
+    assert detect_file(bytes(package), KEYS).verdict is verdict
+    exit_code = (
+        cli.EXIT_VERIFIED
+        if verdict is Verdict.VERIFIED
+        else cli.EXIT_VERIFIED_WITH_UNMARKED_CONTENT
+    )
+    assert _cli(tmp_path, "input.docx", bytes(package), jwks_file) == exit_code
 
 
 def _with_central_zip64(

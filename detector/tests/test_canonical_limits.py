@@ -114,7 +114,7 @@ def test_nested_containers_store_each_item_once(
     with AllocationPeak() as peak:
         scan = scan_html(document)
 
-    # One item list for the document, not one per container (~40 MB).
+    # One item list for the document, not one per container.
     assert peak.bytes < 20_000_000
     assert len(scan.regions) == 250
     assert all(region.canonical == "x" * elements for region in scan.regions.values())
