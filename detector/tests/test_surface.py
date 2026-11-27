@@ -377,7 +377,6 @@ def test_the_verified_meanings_name_what_they_cover() -> None:
     )
     unmarked = VERDICT_MEANING[Verdict.VERIFIED_WITH_UNMARKED_CONTENT]
     assert "another part of an email" in unmarked
-    assert "PDF" in unmarked
 
 
 # ---------------------------------------------------------------------------

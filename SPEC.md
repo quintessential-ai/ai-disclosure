@@ -181,8 +181,11 @@ When a deployment has no signing key, the marker is still issued, with
 `alg: none`, no `kid` and an empty signature part (`HEADER.PAYLOAD.`). It
 states the same facts but proves nothing about its origin. A verifier reports
 it as unsigned and never as verified. A token with `alg: none` and a
-non-empty signature is invalid. The reference issuer also leaves a marker
-unsigned when its token, signed, would be longer than 8192 characters.
+non-empty signature is invalid. With the reference issuer, when the token
+would exceed 8192 characters, the message carries the visible label without
+a token. So does a message whose `on_behalf_of` is longer than 256
+characters, and a file in either case carries its visible label and unsigned
+fields only.
 
 ## Markup allowlist
 
@@ -562,7 +565,7 @@ Verdicts:
 | Verdict | Meaning |
 | --- | --- |
 | `verified` | The original marker is valid, its digest matches, its container holds only allowlisted markup, and outside it the message holds nothing but empty scaffolding (`html`, `head`, `body`, an allowed `meta`, an empty `title`) and the hidden block. In an email, no other part a reader may see is present (step 7); a plain-text alternative to the HTML body is not checked. The words and links are the signed ones; the digest does not cover whitespace, presentation, or how much text a link spans (see [Transport limits](#transport-limits)). |
-| `verified_with_unmarked_content` | The signed text is intact, but styling or markup in or around it, which could change how it is shown, is not vouched for, nor is the rest of the message. The original marker is valid and its digest matches, but its container holds a violation of the markup allowlist (styling, a class, a comment, an element outside the list), or the message has content outside its container (text, links, images or any other element, or another part of an email), or violations outside it (a quoted conversation, a head style sheet, a conditional comment, content added around a copied fragment). None of that may be attributed to the marker. A verified PDF always reads this way, and so does a verified Office file with bytes outside its package's records (see [Verifying a file](#verifying-a-file)). |
+| `verified_with_unmarked_content` | The signed text is intact, but styling or markup in or around it, which could change how it is shown, is not vouched for, nor is the rest of the message. The original marker is valid and its digest matches, but its container holds a violation of the markup allowlist (styling, a class, a comment, an element outside the list), or the message has content outside its container (text, links, images or any other element, or another part of an email), or violations outside it (a quoted conversation, a head style sheet, a conditional comment, content added around a copied fragment). None of that may be attributed to the marker. A verified PDF always reads this way, and so does a verified Office file with bytes its marker does not cover (see [Verifying a file](#verifying-a-file)). |
 | `ai_marked_unverified` | The message carries its own marker but it does not verify: unsigned, bad or unknown signature, rejected token, content changed after signing (for example, a draft a person edited before sending), or missing or non-leading content, a leading hidden block whose container was removed included. Also returned, when no marker of the message's own verifies, for any `X-AI-Generated` header, whatever its value, and for an earlier-format marker or a malformed body token anywhere in the message, a quoted trail included (see below): neither can be placed. A reply that merely quotes an earlier-format message therefore reads `ai_marked_unverified`; a caller checking mail it did not label itself must not read this verdict as "this message was labelled". Beside an original that verifies, such a marker is content outside its container, and the verdict is `verified_with_unmarked_content`; a malformed header token is listed as rejected and leaves the verdict as it is. |
 | `quoted_only` | Every marker is a quoted copy; the message quotes a marked message but was not itself marked. |
 | `no_marker` | No marker found. |
@@ -640,8 +643,10 @@ Recompressing (stored or deflated) or reordering the package keeps the
 digest; changing any part's content (text, numbers, styles, images) breaks it.
 Every byte of the package belongs to a part's local entry, the central
 directory or the end record, each where the central directory and the end
-record place it. Any other byte, before, between or after them, the end
-record's comment included, is content the marker does not cover.
+record place it, with no entry comment, no extra field other than Zip64's,
+and no data in a directory entry. Any other byte, before, between or after
+them, the end record's comment included, is content the marker does not
+cover.
 
 ### `pdf-revision/1`
 
@@ -683,9 +688,10 @@ anything but a token, is a malformed token, never `no_marker`. For step 5,
 recompute the digest for the token's `canon`; a token whose `canon` does not
 belong to the file type is unsupported. The verdict is
 `verified` when the signature is valid and the digest matches, and
-`ai_marked_unverified` otherwise. An Office file with a byte outside its
-package's records reports `verified_with_unmarked_content` instead of
-`verified`, with CLI exit status 4. PDF verification always reports
+`ai_marked_unverified` otherwise. An Office file with a byte its marker
+does not cover (see [`ooxml-parts/1`](#ooxml-parts1)) reports
+`verified_with_unmarked_content` instead of `verified`, with CLI exit
+status 4. PDF verification always reports
 `verified_with_unmarked_content` instead of `verified` when the revision's
 signature and digest match, with CLI exit status 4: the marker-bearing update
 itself, including any page changes it contains, is outside the signature.
@@ -855,7 +861,7 @@ Exit status:
 | 1 | `no_marker` |
 | 2 | The message or key set could not be read (missing file, undecodable charset, input nested too deeply, malformed JWKS, key set not fetched), or `unparseable` |
 | 3 | `ai_marked_unverified` or `quoted_only` |
-| 4 | `verified_with_unmarked_content`, which includes every verified PDF and a verified Office file with bytes outside its package's records |
+| 4 | `verified_with_unmarked_content`, which includes every verified PDF and a verified Office file with bytes its marker does not cover |
 
 By default the key set is fetched over HTTPS from the published location,
 only when a signed marker needs it; `--timeout` sets how long to wait for
@@ -880,8 +886,8 @@ HTML body or a message), decided by how the input starts:
 5. Anything else: an HTML body if it holds a tag, otherwise a message.
 
 A file is recognised only from its first byte. A PDF or Office file with
-anything in front of it is read by what it starts with, and its marker is
-not found: remove what is in front and check the file itself. So a message,
+anything in front of it is read by what it starts with, so its marker may
+not be found: remove what is in front and check the file itself. So a message,
 an HTML file, a PDF or an Office file carrying a marker never reads
 `no_marker` as issued; once something is added in front of or after a file,
 it may.

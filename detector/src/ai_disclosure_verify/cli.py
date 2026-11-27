@@ -8,7 +8,7 @@ means.
 Exit status: 0 when the message's own marker verifies and covers all its
 text, 4 when it verifies but the message carries markup outside the allowlist,
 or anything outside its content, that it does not vouch for (always so for a
-PDF, and for an Office file with bytes outside its package's records), 1 when
+PDF, and for an Office file with bytes its marker does not cover), 1 when
 no marker is present, 2 when the input or key set cannot be read
 (nested too deeply included) or the HTML is unparseable, 3 when a marker is
 present but not verified (unsigned, bad or unknown signature, altered or

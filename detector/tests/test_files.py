@@ -13,6 +13,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+    Ed25519PrivateKey,
+    Ed25519PublicKey,
+)
 from helpers import (
     GOLDEN_KID,
     AllocationPeak,
@@ -24,7 +28,13 @@ from helpers import (
 )
 
 from ai_disclosure_verify import Carrier, ContentCheck, Verdict, cli, files
-from ai_disclosure_verify.detect import MessageDecodeError, detect_file, detect_html
+from ai_disclosure_verify.detect import (
+    FILE_VERDICT_MEANING,
+    VERDICT_MEANING,
+    MessageDecodeError,
+    detect_file,
+    detect_html,
+)
 from ai_disclosure_verify.jws import b64url_encode, decode_compact
 
 # Written by fixtures/generate_fixtures.py with the reference implementation.
@@ -937,6 +947,156 @@ def test_a_package_comment_is_not_covered(
     )
 
 
+@pytest.mark.parametrize("length", [b"\x01\x00", b"\xff\xff"], ids=["one", "max"])
+def test_a_comment_length_declared_past_the_end_is_not_covered(
+    length: bytes, docx: bytes, jwks_file: Path, tmp_path: Path
+) -> None:
+    # The end record declares comment bytes the input does not hold.
+    package = docx[:-2] + length
+
+    assert detect_file(package, KEYS).verdict is Verdict.VERIFIED_WITH_UNMARKED_CONTENT
+    assert (
+        _cli(tmp_path, "input.docx", package, jwks_file)
+        == cli.EXIT_VERIFIED_WITH_UNMARKED_CONTENT
+    )
+
+
+def _extra_field(field_id: int, data: bytes) -> bytes:
+    return field_id.to_bytes(2, "little") + len(data).to_bytes(2, "little") + data
+
+
+def _rewritten(
+    package: bytes,
+    *,
+    local_extra: bytes = b"",
+    central_extra: bytes = b"",
+    comment: bytes = b"",
+    added: tuple[tuple[str, bytes], ...] = (),
+    force_zip64: bool = False,
+    directory_compression: int = zipfile.ZIP_STORED,
+) -> bytes:
+    """``package``'s parts written again, with ``added`` entries after them.
+
+    The first entry gets ``local_extra`` in its local header, and
+    ``central_extra`` and ``comment`` in the central directory only.
+    """
+    buffer = io.BytesIO()
+    with (
+        zipfile.ZipFile(io.BytesIO(package)) as source,
+        zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as target,
+    ):
+        entries = [(info.filename, source.read(info)) for info in source.infolist()]
+        for index, (name, data) in enumerate([*entries, *added]):
+            entry = zipfile.ZipInfo(name, (2026, 1, 1, 0, 0, 0))
+            # Deflating nothing still writes two bytes, so a directory is stored.
+            entry.compress_type = (
+                directory_compression if name.endswith("/") else zipfile.ZIP_DEFLATED
+            )
+            entry.extra = local_extra if index == 0 else b""
+            with target.open(entry, "w", force_zip64=force_zip64) as part:
+                part.write(data)
+            if index == 0:
+                # Set after the local header is written, so only the
+                # central directory carries them.
+                entry.extra = central_extra
+                entry.comment = comment
+    return buffer.getvalue()
+
+
+_NOTE = b"Pay to account 1234"
+
+
+@pytest.mark.parametrize(
+    "rewrite",
+    [
+        pytest.param({"added": (("notes/", _NOTE),)}, id="directory-holding-text"),
+        pytest.param({"comment": _NOTE}, id="entry-comment"),
+        pytest.param(
+            {"local_extra": _extra_field(0xCAFE, _NOTE)}, id="local-extra-field"
+        ),
+        pytest.param(
+            {"central_extra": _extra_field(0xCAFE, _NOTE)}, id="central-extra-field"
+        ),
+        pytest.param(
+            {"local_extra": _extra_field(0x0001, b"\x00" * 16) * 2},
+            id="local-zip64-twice",
+        ),
+        pytest.param(
+            {"local_extra": _extra_field(0x0001, _NOTE * 2)},
+            id="local-zip64-over-its-largest",
+        ),
+        pytest.param(
+            {"local_extra": _extra_field(0x0001, b"\x00" * 29)},
+            id="local-zip64-one-over-its-largest",
+        ),
+        pytest.param(
+            {"local_extra": _extra_field(0x0001, b"\x00" * 16)[:-4]},
+            id="local-zip64-overrunning",
+        ),
+        pytest.param({"central_extra": b"abc"}, id="central-extra-truncated"),
+    ],
+)
+def test_bytes_in_a_record_the_format_does_not_need_are_not_covered(
+    rewrite: dict[str, Any], docx: bytes, jwks_file: Path, tmp_path: Path
+) -> None:
+    """The digest leaves out every field of the records, so each holds unsigned text."""
+    package = _rewritten(docx, **rewrite)
+
+    assert detect_file(package, KEYS).verdict is Verdict.VERIFIED_WITH_UNMARKED_CONTENT
+    assert (
+        _cli(tmp_path, "input.docx", package, jwks_file)
+        == cli.EXIT_VERIFIED_WITH_UNMARKED_CONTENT
+    )
+
+
+@pytest.mark.parametrize(
+    "rewrite",
+    [
+        pytest.param({}, id="rewritten"),
+        pytest.param({"added": (("notes/", b""),)}, id="empty-directory"),
+        pytest.param({"force_zip64": True}, id="zip64-local-headers"),
+        pytest.param(
+            {"central_extra": _extra_field(0x0001, b"\x00" * 16)},
+            id="zip64-directory-field",
+        ),
+        pytest.param(
+            {"local_extra": _extra_field(0x0001, b"\x00" * 28)},
+            id="zip64-field-at-its-largest",
+        ),
+    ],
+)
+def test_a_package_with_only_the_records_the_format_needs_verifies(
+    rewrite: dict[str, Any], docx: bytes, jwks_file: Path, tmp_path: Path
+) -> None:
+    package = _rewritten(docx, **rewrite)
+
+    assert detect_file(package, KEYS).verdict is Verdict.VERIFIED
+    assert _cli(tmp_path, "input.docx", package, jwks_file) == cli.EXIT_VERIFIED
+
+
+def test_a_directory_entry_declaring_either_size_is_not_covered(docx: bytes) -> None:
+    # Deflated, an empty directory holds two bytes but declares none unpacked.
+    deflated = _rewritten(
+        docx, added=(("notes/", b""),), directory_compression=zipfile.ZIP_DEFLATED
+    )
+    # Stored, it holds none but its directory record declares five unpacked.
+    declared = _with_central_field(
+        _rewritten(docx, added=(("notes/", b""),)), "notes/", 24, 5
+    )
+
+    for package in (deflated, declared):
+        assert files._zip_layout(package) is not None
+        assert files.ooxml_uncovered(package) is True
+
+
+def test_the_forced_zip64_package_carries_a_zip64_field(docx: bytes) -> None:
+    """The fixture above exercises the field it is named for."""
+    package = _rewritten(docx, force_zip64=True)
+
+    name_length = int.from_bytes(package[26:28], "little")
+    assert package[30 + name_length : 32 + name_length] == b"\x01\x00"
+
+
 class _Unseekable(io.RawIOBase):
     """A stream zipfile cannot seek back in, so it writes data descriptors."""
 
@@ -970,6 +1130,58 @@ def test_a_package_written_with_data_descriptors_is_covered(docx: bytes) -> None
 def test_a_signed_package_alone_is_covered(docx: bytes) -> None:
     assert files.ooxml_uncovered(docx) is False
     assert detect_file(docx, KEYS).verdict is Verdict.VERIFIED
+
+
+# Words that describe only a message: a file has no HTML body or markup.
+_MESSAGE_ONLY = ("message", "HTML", "plain-text", "markup", "presentation", "email")
+
+
+@pytest.mark.parametrize(
+    ("fixture", "keys", "verdict"),
+    [
+        ("signed.docx", KEYS, Verdict.VERIFIED),
+        ("signed.pdf", KEYS, Verdict.VERIFIED_WITH_UNMARKED_CONTENT),
+        (
+            "signed.docx",
+            {GOLDEN_KID: Ed25519PrivateKey.generate().public_key()},
+            Verdict.UNVERIFIED,
+        ),
+    ],
+    ids=["office-verified", "pdf-verified", "office-other-key"],
+)
+def test_a_files_verdict_is_explained_without_message_words(
+    fixture: str,
+    keys: dict[str, Ed25519PublicKey],
+    verdict: Verdict,
+) -> None:
+    report = detect_file((FIXTURES / fixture).read_bytes(), keys)
+
+    assert report.verdict is verdict
+    meaning = report.to_dict()["meaning"]
+    assert meaning in report.describe()
+    assert [word for word in _MESSAGE_ONLY if word in meaning] == []
+
+
+@pytest.mark.parametrize("json_output", [False, True], ids=["text", "json"])
+def test_the_command_explains_a_verified_file_in_file_words(
+    json_output: bool,
+    docx: bytes,
+    jwks_file: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "report.docx"
+    path.write_bytes(docx)
+
+    exit_code = cli.main(
+        [str(path), "--jwks", str(jwks_file), *(["--json"] if json_output else [])]
+    )
+
+    assert exit_code == cli.EXIT_VERIFIED
+    out = capsys.readouterr().out
+    printed = json.loads(out)["meaning"] if json_output else " ".join(out.split())
+    assert FILE_VERDICT_MEANING[Verdict.VERIFIED] in printed
+    assert VERDICT_MEANING[Verdict.VERIFIED] not in printed
 
 
 def test_a_mail_quoting_a_file_signature_has_no_marker() -> None:
