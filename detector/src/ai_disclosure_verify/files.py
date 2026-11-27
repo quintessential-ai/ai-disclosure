@@ -329,13 +329,13 @@ def _pdf_property_value(
     skipped = _PDF_SKIP.match(data, match.end())
     position = skipped.end() if skipped else match.end()
     if data[position : position + 1] == b"(":
-        # A writer may escape any byte of an Info string, pypdf the dots as \056.
+        # Escapes are decoded (ISO 32000-1, 7.3.4.2): a writer may escape any byte.
         body = _pdf_literal_body(data, position)
         return (_pdf_literal(body) if body is not None else b""), len(data)
     if data[position : position + 2] != b"<<" and data[position : position + 1] == b"<":
         return _pdf_hex(data, position), len(data)
-    # Not a string: a mention in text, a dictionary or an indirect reference.
-    # Searching on from after the comments skips names inside them.
+    # Not a string, so not the property; searching on after the skipped
+    # comments ignores names inside them.
     return None, position
 
 

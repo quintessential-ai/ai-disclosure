@@ -430,9 +430,8 @@ def _detect_html(
     if original_region is None and header_mid is not None:
         candidate = scan.regions.get(header_mid)
         original_region = candidate if candidate and candidate.leads else None
-    # The original's hidden block is not content, unless the header verifies
-    # and the block's own token does not: a block that copies a genuine
-    # header's mid still carries text for a reader of the markup.
+    # The original's hidden block is markup, not content, unless another
+    # original marker verifies and the block's own token does not.
     vouched = any(f.verified for f in findings if f.placement is Placement.ORIGINAL)
     own_block = (
         original
@@ -494,8 +493,7 @@ def _detect_message(
         document = body.get_content() if body is not None else ""
         others = _other_parts(message, body)
     except (LookupError, ValueError) as exc:
-        # An unknown charset, or a name the codec registry refuses (a NUL in
-        # it, or a codec such as idna that cannot decode a body).
+        # A charset the codec registry cannot decode the part with.
         msg = f"cannot decode the HTML part: {exc}"
         raise MessageDecodeError(msg) from exc
     except RecursionError as exc:
@@ -565,6 +563,12 @@ _HTML_TAG = re.compile(rb"<[!/A-Za-z]")
 _MARKER_ATTRIBUTE = re.compile(rb"data-ai-disclosure", re.IGNORECASE)
 
 
+_TEXT_BEFORE_A_FILE = (
+    "cannot tell a message from a PDF or Office file with text in front of "
+    "it: remove the text before the file and check again"
+)
+
+
 def detect_file(
     data: bytes, keys: Mapping[str, Ed25519PublicKey] | None = None
 ) -> DetectionReport:
@@ -592,6 +596,10 @@ def _detect_file(
 ) -> DetectionReport:
     text = data.removeprefix(b"\xef\xbb\xbf").lstrip()
     window = data[:_SIGNATURE_WINDOW]
+    # A genuine PDF or Office file never carries the other's signature this early.
+    both = b"%PDF-" in window and b"PK\x03\x04" in window
+    if (is_ooxml(data) or is_pdf(data)) and both:
+        raise MessageDecodeError(_TEXT_BEFORE_A_FILE)
     if is_ooxml(data):
         return _detect_ooxml(data, keys)
     if is_pdf(data):
@@ -601,13 +609,45 @@ def _detect_file(
         return detect_html(data.decode("utf-8-sig", errors="replace"), keys)
     if _HEADER_FIELD.match(text):
         return _detect_header_led(data, text, keys)
-    if b"%PDF-" in window:
-        return _detect_pdf(data, keys)
-    if b"PK\x03\x04" in window:
-        return _detect_ooxml(data, keys)
+    if both:
+        raise MessageDecodeError(_TEXT_BEFORE_A_FILE)
+    if b"%PDF-" in window or b"PK\x03\x04" in window:
+        return _detect_file_behind_text(data, text, keys)
     if _HTML_TAG.search(text):
         return detect_html(data.decode("utf-8-sig", errors="replace"), keys)
     return detect_message(text, keys)
+
+
+def _detect_file_behind_text(
+    data: bytes, text: bytes, keys: Mapping[str, Ed25519PublicKey] | None
+) -> DetectionReport:
+    """A file signature in the first 1024 bytes but not at the start.
+
+    The file reading is reported when it finds a marker, then an HTML reading
+    that does; otherwise which one is meant cannot be told, and the input is
+    refused rather than guessed at.
+
+    Raises:
+        MessageDecodeError: No reading finds a marker.
+
+    """
+    try:
+        as_file = (
+            _detect_pdf(data, keys)
+            if b"%PDF-" in data[:_SIGNATURE_WINDOW]
+            else _detect_ooxml(data, keys)
+        )
+    except MessageDecodeError:
+        as_file = None
+    if as_file is not None and as_file.findings:
+        return as_file
+    if _HTML_TAG.search(text):
+        as_html = detect_html(data.decode("utf-8-sig", errors="replace"), keys)
+        if as_html.findings or (
+            as_html.unparseable is not None and _MARKER_ATTRIBUTE.search(text)
+        ):
+            return as_html
+    raise MessageDecodeError(_TEXT_BEFORE_A_FILE)
 
 
 def _detect_header_led(
@@ -634,11 +674,7 @@ def _detect_header_led(
             return as_html
     window = data[:_SIGNATURE_WINDOW]
     if b"%PDF-" in window or b"PK\x03\x04" in window:
-        msg = (
-            "cannot tell a message from a PDF or Office file with text in front "
-            "of it: remove the text before the file and check again"
-        )
-        raise MessageDecodeError(msg)
+        raise MessageDecodeError(_TEXT_BEFORE_A_FILE)
     return report
 
 
@@ -760,8 +796,11 @@ def _claims_error(header: Mapping[str, Any], claims: Mapping[str, Any]) -> str |
         return f"unsupported header members {extra!r}"
     if not isinstance(header.get("kid", ""), str):
         return "header kid is not a string"
-    if header.get("alg") not in {ALG_EDDSA, ALG_NONE}:
+    # A tuple compares by equality, so an unhashable alg is refused, not raised.
+    if header.get("alg") not in (ALG_EDDSA, ALG_NONE):
         return f"unsupported alg {header.get('alg')!r}"
+    if header.get("alg") == ALG_NONE and "kid" in header:
+        return "an unsigned token names a kid"
     if claims.get("spec") != SPEC:
         return f"unsupported spec {claims.get('spec')!r}"
     if claims.get("ai_generated") is not True:

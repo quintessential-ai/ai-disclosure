@@ -720,8 +720,16 @@ def test_content_with_a_lone_surrogate_verifies() -> None:
         ({"kid": 7}, "header kid is not a string"),
         ({"alg": "HS256"}, "unsupported alg 'HS256'"),
         ({"alg": "Ed25519"}, "unsupported alg 'Ed25519'"),
+        ({"kid": "k"}, "an unsigned token names a kid"),
     ],
-    ids=["crit", "b64-and-jku", "kid-not-a-string", "hs256", "ed25519-as-alg"],
+    ids=[
+        "crit",
+        "b64-and-jku",
+        "kid-not-a-string",
+        "hs256",
+        "ed25519-as-alg",
+        "unsigned-with-a-kid",
+    ],
 )
 def test_a_header_outside_the_profile_rejects_the_token(
     header: dict[str, Any], error: str
