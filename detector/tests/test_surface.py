@@ -654,6 +654,21 @@ def test_a_charset_the_codecs_refuse_fails_closed(charset: str) -> None:
         detect_message(raw)
 
 
+def test_the_command_escapes_the_unparseable_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # A reason can quote the input; it must not reach the terminal raw.
+    report = DetectionReport((), unparseable="bad \x1b[31mtag")
+    monkeypatch.setattr(cli, "detect_file", lambda *_: report)
+
+    assert _run(tmp_path, b"<p>x</p>") == cli.EXIT_ERROR
+    err = capsys.readouterr().err
+    assert "\x1b" not in err
+    assert "\\x1b[31mtag" in err
+
+
 def test_the_command_escapes_input_quoted_in_an_error(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

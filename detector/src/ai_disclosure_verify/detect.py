@@ -573,13 +573,10 @@ def detect_file(
     the first 1024 bytes; any tag (``<`` then a letter, ``/`` or ``!``)
     anywhere (HTML). Anything else is read as a message.
 
-    Input read as a message for its first line that has no HTML body and no
-    marker is read again as a PDF or Office file when its first 1024 bytes
-    hold that signature, else as HTML when it holds a tag, such as a fragment
-    that starts ``Note: ...``. The file reading is reported when it finds a
-    marker, and is dropped when the file cannot be read; the HTML one when it finds a marker, or when it is
-    ``unparseable`` and the input holds ``data-ai-disclosure``. So the guess
-    never hides a marker as ``no_marker``.
+    Input read as a message for its first line, such as a fragment that
+    starts ``Note: ...``, that has no HTML body and no marker is read again
+    (``_detect_header_led``), so the guess never hides a marker as
+    ``no_marker``.
 
     Raises:
         MessageDecodeError: The file could not be read far enough to look
@@ -620,7 +617,15 @@ def _detect_file(
 def _detect_header_led(
     data: bytes, text: bytes, keys: Mapping[str, Ed25519PublicKey] | None
 ) -> DetectionReport:
-    """Input that starts like a header field: a message, or else a file or an HTML fragment."""
+    """Input that starts like a header field: a message, or else a file or an HTML fragment.
+
+    A message with no HTML body and no marker is read again: as a PDF or
+    Office file when its first 1024 bytes hold that signature, reported when
+    its token decodes; failing that, as HTML when it holds a tag, reported
+    when it finds a marker, or when it is ``unparseable`` and the input holds
+    ``data-ai-disclosure``. A message that only mentions a signature or the
+    property name keeps its own reading.
+    """
     report, has_html = _detect_message(text, keys)
     if has_html or report.verdict is not Verdict.NONE:
         return report
@@ -630,9 +635,9 @@ def _detect_header_led(
         try:
             as_file = detect(data, keys)
         except MessageDecodeError:
-            # A message that only mentions a signature: the guess was wrong.
-            return report
-        return as_file if as_file.findings else report
+            as_file = None
+        if as_file is not None and any(_decodes(f) for f in as_file.findings):
+            return as_file
     if not _HTML_TAG.search(text):
         return report
     as_html = detect_html(data.decode("utf-8-sig", errors="replace"), keys)
@@ -641,6 +646,19 @@ def _detect_header_led(
     ):
         return as_html
     return report
+
+
+# The errors of a token that does not decode, as opposed to one that decodes
+# and breaks a rule.
+_MALFORMED_TOKEN = "malformed token"
+_MALFORMED_LEGACY = "malformed legacy marker"
+
+
+def _decodes(finding: Finding) -> bool:
+    """Whether the finding's token decoded, whatever its signature or claims."""
+    return finding.error is None or not finding.error.startswith(
+        (_MALFORMED_TOKEN, _MALFORMED_LEGACY)
+    )
 
 
 # What reading a hostile Office package can raise. ``files`` turns a part's
@@ -730,7 +748,7 @@ def _check_token(
             placement=Placement.UNKNOWN if carrier is Carrier.BODY else placement,
             signature=SignatureStatus.INVALID,
             content=ContentCheck.NOT_FOUND,
-            error=f"malformed token: {exc}",
+            error=f"{_MALFORMED_TOKEN}: {exc}",
         )
     claims = token.payload
     kid = token.header.get("kid")
@@ -784,9 +802,9 @@ def _legacy_finding(value: str, carrier: Carrier, placement: Placement) -> Findi
     try:
         claims = parse_json(value)
     except ValueError as exc:
-        claims, error = {}, f"malformed legacy marker: {exc}"
+        claims, error = {}, f"{_MALFORMED_LEGACY}: {exc}"
     else:
-        error = None if isinstance(claims, dict) else "malformed legacy marker"
+        error = None if isinstance(claims, dict) else _MALFORMED_LEGACY
         claims = claims if isinstance(claims, dict) else {}
     return Finding(
         carrier=carrier,
