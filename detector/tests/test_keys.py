@@ -347,6 +347,24 @@ def test_a_refused_address_falls_through_to_the_next(
         assert list(fetch_jwks(server.url, timeout=5)) == ["golden-vectors"]
 
 
+def test_an_address_family_the_host_cannot_open_falls_through_to_the_next(
+    certificates: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A family number no system implements: creating its socket fails, as
+    # IPv6 does on a host without it.
+    unsupported = 250
+    body = json.dumps(golden_jwks()).encode()
+    prefix = b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n%s" % (len(body), body)
+    with _TlsServer(certificates, prefix) as server:
+        answers = [
+            (unsupported, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("::1", 1)),
+            *_resolving_to([("127.0.0.1", server.port)])(),
+        ]
+        monkeypatch.setattr(socket, "getaddrinfo", lambda *_, **__: answers)
+
+        assert list(fetch_jwks(server.url, timeout=5)) == ["golden-vectors"]
+
+
 @pytest.mark.parametrize(
     "answer",
     [

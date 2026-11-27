@@ -14,7 +14,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, Any, Protocol, Self
+from typing import IO, TYPE_CHECKING, Protocol, Self
 
 from ai_disclosure_verify.jws import keys_from_jwks, parse_json
 
@@ -120,7 +120,7 @@ class _HttpsRedirectHandler(urllib.request.HTTPRedirectHandler):
         code: int,
         msg: str,
         headers: HTTPMessage,
-    ) -> Any:
+    ) -> http.client.HTTPResponse | None:
         # Closed unread: urllib's own handler reads the whole body first, with
         # no size cap.
         fp.close()
@@ -176,12 +176,15 @@ def _connect(
         host, port, type=socket.SOCK_STREAM
     ):
         timeout = _remaining(deadline)
-        sock = plain(family, kind, proto)
+        sock = None
         try:
+            # Inside the try: a family this host cannot open moves to the next.
+            sock = plain(family, kind, proto)
             sock.settimeout(timeout)
             sock.connect(sockaddr)
         except OSError as exc:
-            sock.close()
+            if sock is not None:
+                sock.close()
             errors.append(exc)
             continue
         return sock
@@ -229,9 +232,9 @@ def _connection_class(deadline: float) -> type[http.client.HTTPSConnection]:
     context.sslsocket_class = _Tls
 
     class _Connection(http.client.HTTPSConnection):
-        def __init__(self, host: str, **kwargs: Any) -> None:
-            kwargs["context"] = context
-            super().__init__(host, **kwargs)
+        # ``_HttpsHandler.https_open`` has ``do_open`` pass the host and timeout only.
+        def __init__(self, host: str, *, timeout: float | None) -> None:
+            super().__init__(host, timeout=timeout, context=context)
             # http.client's hook for making the socket, which connect() calls.
             self._create_connection = functools.partial(_connect, _Plain, deadline)
 

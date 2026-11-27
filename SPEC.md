@@ -862,12 +862,14 @@ message has content outside the marker, the first violation of
 the markup allowlist and their count, and every marker found
 with its carrier, placement, signature and content results, each with a
 plain-language meaning (for a mismatch: content changed after signing).
-`--json` prints the same report as JSON. Values taken from the message
-(claims, the key id, the `X-AI-Generated` header, markup names, reasons)
-are printed in quotes, with `\`, `"` and every unprintable character
-(controls, line separators, bidirectional overrides) written as a Python
-escape, so none can start a line of its own or reach the terminal as a
-control sequence. The JSON report is ASCII, every other character escaped.
+`--json` prints the same report as JSON. Every value taken from the message
+is printed with `\`, `"` and every unprintable character (controls, line
+separators, bidirectional overrides) written as a Python escape, so none can
+start a line of its own or reach the terminal as a control sequence. The
+claims, the key id and the `X-AI-Generated` header are also printed in
+quotes; markup names, the reason a token was rejected and the reason the
+input is unparseable are not. The JSON report is ASCII, every other
+character escaped.
 Exit status:
 
 | Status | Meaning |
