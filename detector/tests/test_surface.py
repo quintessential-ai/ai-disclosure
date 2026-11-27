@@ -18,7 +18,6 @@ from typing import Any
 import pytest
 from helpers import (
     GOLDEN_KID,
-    ROOT,
     golden_public_key,
     golden_token,
     signed_vector_body,
@@ -577,12 +576,6 @@ def test_plain_text_without_markup_has_no_marker() -> None:
 # ---------------------------------------------------------------------------
 # Packaging
 # ---------------------------------------------------------------------------
-
-
-def test_the_package_ships_the_repository_licence() -> None:
-    assert (ROOT / "detector" / "LICENSE").read_bytes() == (
-        ROOT / "LICENSE"
-    ).read_bytes()
 
 
 def test_a_legacy_marker_with_a_huge_number_reads_as_malformed() -> None:

@@ -42,7 +42,7 @@ from ai_disclosure_verify.files import (
     is_pdf,
     ooxml_digest,
     ooxml_token,
-    ooxml_trailing,
+    ooxml_uncovered,
     pdf_digest,
     pdf_token,
 )
@@ -159,8 +159,9 @@ VERDICT_MEANING: dict[Verdict, str] = {
     Verdict.VERIFIED_WITH_UNMARKED_CONTENT: (
         "the signed text is intact, but styling or markup in or around it, "
         "which could change how it is shown, is not vouched for, nor is the "
-        "rest of the message (such as a quoted reply, another part of an email "
-        "or, in a PDF, the update that added the marker); see "
+        "rest of the message (such as a quoted reply, another part of an email, "
+        "in a PDF the update that added the marker, or in an Office file bytes "
+        "outside its package's records); see "
         "disallowed_markup, and do not attribute any of it to the marker"
     ),
     Verdict.UNVERIFIED: (
@@ -244,7 +245,8 @@ class DetectionReport:
     container, beyond the document's scaffolding and the marker block, or, in
     an email, another part a reader may see other than a plain-text
     alternative to the HTML body (see ``detect_message``). A PDF with a marker
-    always sets it.
+    always sets it, and an Office file with a marker sets it when a byte lies
+    outside its package's records.
     ``disallowed_markup`` describes markup outside the allowlist, placed
     against the original container. ``unparseable`` says why the HTML could
     not be read; the findings are then empty.
@@ -650,8 +652,8 @@ def _detect_ooxml(
     report = _detect_document(
         token, keys, OOXML_CANONICALISATION, lambda: ooxml_digest(data)
     )
-    # Bytes after the package's end are not covered by its marker.
-    return replace(report, unmarked_content=token is not None and ooxml_trailing(data))
+    # Bytes outside the package's records are not covered by its marker.
+    return replace(report, unmarked_content=token is not None and ooxml_uncovered(data))
 
 
 def _detect_pdf(
