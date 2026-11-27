@@ -46,6 +46,9 @@ from ai_disclosure_verify.files import (
     pdf_token,
 )
 from ai_disclosure_verify.jws import (
+    ALG_EDDSA,
+    ALG_NONE,
+    HEADER_MEMBERS,
     MalformedTokenError,
     SignatureStatus,
     check_signature,
@@ -567,15 +570,8 @@ def detect_file(
 ) -> DetectionReport:
     """Detect markers in an Office (OOXML) file, a PDF, a bare HTML document or an RFC 5322 message.
 
-    The type is read from the content, in this order: a zip or PDF
-    signature at the start; after a UTF-8 byte-order mark and whitespace,
-    ``<`` (HTML) or a header field (a message); a PDF or zip signature in
-    the first 1024 bytes; any tag (``<`` then a letter, ``/`` or ``!``)
-    anywhere (HTML). Anything else is read as a message.
-
-    Input read as a message for its first line, such as a fragment that
-    starts ``Note: ...``, that has no HTML body and no marker is read again
-    (``_detect_header_led``), so the guess never hides a marker as
+    The type is read from the content, never the name, as the specification's
+    "Reading the input" sets out; a guess never hides a marker as
     ``no_marker``.
 
     Raises:
@@ -617,71 +613,39 @@ def _detect_file(
 def _detect_header_led(
     data: bytes, text: bytes, keys: Mapping[str, Ed25519PublicKey] | None
 ) -> DetectionReport:
-    """Input that starts like a header field: a message, or else a file or an HTML fragment.
+    """Input that starts like a header field: a message, else an HTML fragment.
 
-    A message with no HTML body and no marker is read again: as a PDF or
-    Office file when its first 1024 bytes hold that signature (see
-    ``_header_led_file``); failing that, as HTML when it holds a tag, reported
-    when it finds a marker, or when it is ``unparseable`` and the input holds
-    ``data-ai-disclosure``. A message that only mentions a signature or the
-    property name keeps its own reading.
+    When neither reading finds a marker and the input's first 1024 bytes hold
+    a PDF or zip signature, which reading is meant cannot be told, so the
+    input is refused rather than guessed at.
+
+    Raises:
+        MessageDecodeError: The input holds a file signature behind text.
+
     """
     report, has_html = _detect_message(text, keys)
     if has_html or report.verdict is not Verdict.NONE:
         return report
-    as_file = _header_led_file(data, keys)
-    if as_file is not None:
-        return as_file
-    if not _HTML_TAG.search(text):
-        return report
-    as_html = detect_html(data.decode("utf-8-sig", errors="replace"), keys)
-    if as_html.findings or (
-        as_html.unparseable is not None and _MARKER_ATTRIBUTE.search(text)
-    ):
-        return as_html
-    return report
-
-
-def _header_led_file(
-    data: bytes, keys: Mapping[str, Ed25519PublicKey] | None
-) -> DetectionReport | None:
-    """Header-led input read as the file whose signature its first 1024 bytes hold, or None.
-
-    The file reading needs a marker, and either a token that decodes or the
-    file itself: for a PDF, a ``%%EOF`` after the header and before the
-    marker; for an Office file, a package that opens. So a malformed marker
-    in a real file stays malformed, while a message that only mentions a
-    signature and the property keeps its own reading.
-    """
+    if _HTML_TAG.search(text):
+        as_html = detect_html(data.decode("utf-8-sig", errors="replace"), keys)
+        if as_html.findings or (
+            as_html.unparseable is not None and _MARKER_ATTRIBUTE.search(text)
+        ):
+            return as_html
     window = data[:_SIGNATURE_WINDOW]
-    if b"%PDF-" in window:
-        found = pdf_token(data)
-        as_file = _pdf_report(found, keys)
-        is_file = found is not None and b"%PDF-" in found[1]
-    elif b"PK\x03\x04" in window:
-        try:
-            as_file = _detect_ooxml(data, keys)
-        except MessageDecodeError:
-            return None
-        is_file = True
-    else:
-        return None
-    if as_file.findings and (is_file or any(_decodes(f) for f in as_file.findings)):
-        return as_file
-    return None
+    if b"%PDF-" in window or b"PK\x03\x04" in window:
+        msg = (
+            "cannot tell a message from a PDF or Office file with text in front "
+            "of it: remove the text before the file and check again"
+        )
+        raise MessageDecodeError(msg)
+    return report
 
 
 # The errors of a token that does not decode, as opposed to one that decodes
 # and breaks a rule.
 _MALFORMED_TOKEN = "malformed token"
 _MALFORMED_LEGACY = "malformed legacy marker"
-
-
-def _decodes(finding: Finding) -> bool:
-    """Whether the finding's token decoded, whatever its signature or claims."""
-    return finding.error is None or not finding.error.startswith(
-        (_MALFORMED_TOKEN, _MALFORMED_LEGACY)
-    )
 
 
 # What reading a hostile Office package can raise. ``files`` turns a part's
@@ -712,12 +676,7 @@ def _detect_ooxml(
 def _detect_pdf(
     data: bytes, keys: Mapping[str, Ed25519PublicKey] | None
 ) -> DetectionReport:
-    return _pdf_report(pdf_token(data), keys)
-
-
-def _pdf_report(
-    found: tuple[str, bytes] | None, keys: Mapping[str, Ed25519PublicKey] | None
-) -> DetectionReport:
+    found = pdf_token(data)
     report = _detect_document(
         found[0] if found else None,
         keys,
@@ -797,6 +756,12 @@ def _claims_error(header: Mapping[str, Any], claims: Mapping[str, Any]) -> str |
     """Why the token is not a version-1 disclosure marker, or None when it is."""
     if header.get("typ") != TOKEN_TYPE:
         return f"unsupported typ {header.get('typ')!r}"
+    if extra := sorted(set(header) - HEADER_MEMBERS):
+        return f"unsupported header members {extra!r}"
+    if not isinstance(header.get("kid", ""), str):
+        return "header kid is not a string"
+    if header.get("alg") not in {ALG_EDDSA, ALG_NONE}:
+        return f"unsupported alg {header.get('alg')!r}"
     if claims.get("spec") != SPEC:
         return f"unsupported spec {claims.get('spec')!r}"
     if claims.get("ai_generated") is not True:

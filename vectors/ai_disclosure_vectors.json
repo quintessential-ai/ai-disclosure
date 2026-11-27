@@ -1222,7 +1222,7 @@
             "placement": "original",
             "signature": "invalid",
             "content": "match",
-            "rejected": false,
+            "rejected": true,
             "legacy": false
           }
         ]
@@ -1246,7 +1246,7 @@
             "placement": "original",
             "signature": "invalid",
             "content": "match",
-            "rejected": false,
+            "rejected": true,
             "legacy": false
           }
         ]
@@ -1270,7 +1270,7 @@
             "placement": "original",
             "signature": "invalid",
             "content": "match",
-            "rejected": false,
+            "rejected": true,
             "legacy": false
           }
         ]
@@ -1294,7 +1294,7 @@
             "placement": "original",
             "signature": "invalid",
             "content": "match",
-            "rejected": false,
+            "rejected": true,
             "legacy": false
           }
         ]
@@ -1318,7 +1318,7 @@
             "placement": "original",
             "signature": "invalid",
             "content": "match",
-            "rejected": false,
+            "rejected": true,
             "legacy": false
           }
         ]
@@ -1342,7 +1342,7 @@
             "placement": "original",
             "signature": "invalid",
             "content": "match",
-            "rejected": false,
+            "rejected": true,
             "legacy": false
           }
         ]

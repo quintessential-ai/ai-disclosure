@@ -8,6 +8,7 @@ import io
 import json
 import re
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -513,6 +514,20 @@ def _token_of_pdf(marked: bytes) -> bytes:
     return marked.split(b"/AIDisclosure (")[1].split(b")")[0]
 
 
+def test_a_hex_token_with_whitespace_pdf_does_not_know_is_malformed(
+    pdf: bytes,
+) -> None:
+    # bytes.fromhex skips VT; PDF whitespace does not include it.
+    token = _token_of_pdf(pdf)
+    digits = token.hex().encode()
+    rewritten = pdf.replace(
+        b"(" + token + b")", b"<" + digits[:4] + b"\x0b\x0b" + digits[4:] + b">"
+    )
+    assert rewritten != pdf
+
+    _assert_one_malformed_file_token(rewritten)
+
+
 def test_a_signed_token_written_as_a_bare_hex_value_does_not_verify(
     pdf: bytes,
 ) -> None:
@@ -581,19 +596,10 @@ def test_page_text_that_mentions_the_property_hides_no_marker(
     ],
     ids=["zip", "pdf"],
 )
-def test_a_failed_file_guess_still_reads_the_fragment_as_html(data: bytes) -> None:
-    assert detect_file(data).verdict is Verdict.UNVERIFIED
-
-
-def test_a_message_that_mentions_a_pdf_and_the_property_reads_as_the_message(
-    tmp_path: Path,
+def test_a_header_led_fragment_with_a_file_signature_reads_its_html_marker(
+    data: bytes,
 ) -> None:
-    data = b"Subject: x\n\nA %PDF-1.7 file carries /AIDisclosure (x) in its Info.\n"
-
-    assert detect_file(data).verdict is Verdict.NONE
-    path = tmp_path / "note.eml"
-    path.write_bytes(data)
-    assert cli.main([str(path), "--offline"]) == cli.EXIT_NO_MARKER
+    assert detect_file(data).verdict is Verdict.UNVERIFIED
 
 
 def test_only_the_first_pdf_property_is_read() -> None:
@@ -603,83 +609,80 @@ def test_only_the_first_pdf_property_is_read() -> None:
     assert found[0] == "bad"
 
 
-def test_a_message_that_mentions_a_zip_signature_reads_as_the_message(
+def _corrupt_first_dot(token: bytes) -> bytes:
+    return token.replace(b".", b"!", 1)
+
+
+def _over_the_part_cap(docx: bytes) -> bytes:
+    buffer = io.BytesIO(docx)
+    with zipfile.ZipFile(buffer, "a") as zf:
+        for index in range(files.MAX_PACKAGE_PARTS + 1):
+            zf.writestr(f"empty/{index}/", b"")
+    return buffer.getvalue()
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        pytest.param(lambda pdf, docx: b"Note: x\n" + pdf, id="signed-pdf"),
+        pytest.param(
+            lambda pdf, docx: (
+                b"Note: x\n"
+                + pdf.replace(
+                    _token_of_pdf(pdf), _corrupt_first_dot(_token_of_pdf(pdf))
+                )
+            ),
+            id="corrupt-pdf-token",
+        ),
+        pytest.param(lambda pdf, docx: b"Note: x\n" + _PDF, id="unmarked-pdf"),
+        pytest.param(lambda pdf, docx: b"Note: x\n" + docx, id="signed-docx"),
+        pytest.param(
+            lambda pdf, docx: b"Note: x\n" + _over_the_part_cap(docx),
+            id="over-cap-docx",
+        ),
+        pytest.param(
+            lambda pdf, docx: (
+                b"Subject: x\n\nA %PDF-1.7 trailer: startxref 9\n%%EOF\n"
+                b"then /AIDisclosure (x) in its Info.\n"
+            ),
+            id="prose-quoting-a-pdf",
+        ),
+        pytest.param(
+            lambda pdf, docx: b"Subject: x\n\nThe bytes PK\x03\x04 open a zip file.\n",
+            id="prose-quoting-a-zip-signature",
+        ),
+    ],
+)
+def test_text_in_front_of_a_file_signature_is_unreadable(
+    pdf: bytes, docx: bytes, build: Callable[[bytes, bytes], bytes], tmp_path: Path
+) -> None:
+    data = build(pdf, docx)
+
+    with pytest.raises(MessageDecodeError, match="remove the text before the file"):
+        detect_file(data, KEYS)
+    path = tmp_path / "input.eml"
+    path.write_bytes(data)
+    assert cli.main([str(path), "--offline"]) == cli.EXIT_ERROR
+
+
+@pytest.mark.parametrize("signature", [b"%PDF-1.7", b"PK\x03\x04"], ids=["pdf", "zip"])
+def test_a_file_signature_past_the_first_1024_bytes_is_not_ambiguous(
+    signature: bytes,
+) -> None:
+    data = b"Note: x\n" + b"a" * 1024 + b" " + signature + b"\n"
+
+    assert detect_file(data).verdict is Verdict.NONE
+
+
+def test_a_header_led_message_without_a_file_signature_has_no_marker(
     tmp_path: Path,
 ) -> None:
-    data = b"Subject: x\n\nThe bytes PK\x03\x04 open a zip file.\n"
+    data = b"Note: x\nNothing marked here.\n"
 
     assert detect_file(data).verdict is Verdict.NONE
     path = tmp_path / "note.eml"
     path.write_bytes(data)
     assert cli.main([str(path), "--offline"]) == cli.EXIT_NO_MARKER
-
-
-@pytest.mark.parametrize(
-    ("fixture", "verdict", "content"),
-    [
-        ("signed.docx", Verdict.VERIFIED, ContentCheck.MATCH),
-        # The line is part of the PDF revision the digest covers.
-        ("signed.pdf", Verdict.UNVERIFIED, ContentCheck.MISMATCH),
-    ],
-    ids=["ooxml", "pdf"],
-)
-def test_a_header_like_line_before_a_marked_file_keeps_its_marker(
-    fixture: str, verdict: Verdict, content: ContentCheck
-) -> None:
-    report = detect_file(b"Note: x\n" + (FIXTURES / fixture).read_bytes(), KEYS)
-
-    assert report.verdict is verdict
-    (finding,) = report.findings
-    assert finding.carrier is Carrier.FILE_METADATA
-    assert finding.content is content
-
-
-def test_a_header_like_line_before_an_unmarked_pdf_reads_as_the_message() -> None:
-    assert detect_file(b"Note: x\n" + _PDF).verdict is Verdict.NONE
-
-
-def _corrupt_first_dot(token: bytes) -> bytes:
-    return token.replace(b".", b"!", 1)
-
-
-def test_a_header_like_line_before_a_pdf_keeps_its_malformed_marker(
-    pdf: bytes,
-) -> None:
-    token = _token_of_pdf(pdf)
-
-    _assert_one_malformed_file_token(
-        b"Note: x\n" + pdf.replace(token, _corrupt_first_dot(token))
-    )
-
-
-def test_a_header_like_line_before_an_office_file_keeps_its_malformed_marker(
-    docx: bytes,
-) -> None:
-    with zipfile.ZipFile(io.BytesIO(docx)) as zf:
-        custom = zf.read("docProps/custom.xml")
-    match = re.search(rb"<vt:lpwstr>([^<]+)</vt:lpwstr>", custom)
-    assert match is not None
-    token = match.group(1)
-    corrupt = _repack(
-        docx, {"docProps/custom.xml": custom.replace(token, _corrupt_first_dot(token))}
-    )
-
-    _assert_one_malformed_file_token(b"Note: x\n" + corrupt)
-
-
-@pytest.mark.parametrize(
-    "data",
-    [
-        b"Note: x\nA %PDF-1.7 file carries /AIDisclosure (a!b.c) in its Info.\n",
-        # An end marker before the header is not a revision before the marker.
-        b"Note: x\n%%EOF then %PDF-1.7 with /AIDisclosure (a!b.c)\n",
-    ],
-    ids=["no-end-marker", "end-marker-before-header"],
-)
-def test_a_header_like_line_mentioning_a_pdf_and_the_property_has_no_marker(
-    data: bytes,
-) -> None:
-    assert detect_file(data).verdict is Verdict.NONE
 
 
 @pytest.mark.parametrize(
@@ -727,13 +730,27 @@ def test_the_xmp_prefix_is_matched_as_written(
     assert detect_file(rewritten, KEYS).verdict is verdict
 
 
+@pytest.mark.parametrize(
+    "mention",
+    [
+        b"BT (see /AIDisclosure (x)) Tj ET\n",
+        b"% see /AIDisclosure (x)\n",
+        b'BT (see cpxai:AIDisclosure="x") Tj ET\n',
+        b"BT (the <cpxai:AIDisclosure>x</cpxai:AIDisclosure> tag) Tj ET\n",
+    ],
+    ids=[
+        "info-key-in-text",
+        "info-key-in-comment",
+        "xmp-attribute-in-text",
+        "xmp-element-in-text",
+    ],
+)
 def test_page_text_mentioning_the_property_before_a_string_fails_closed(
-    pdf: bytes,
+    pdf: bytes, mention: bytes
 ) -> None:
     original = _PDF.replace(
         b"trailer",
-        b"4 0 obj << /Length 34 >> stream\nBT (see /AIDisclosure (x)) Tj ET\n"
-        b"endstream endobj\ntrailer",
+        b"4 0 obj << /Length 34 >> stream\n" + mention + b"endstream endobj\ntrailer",
     )
 
     _assert_one_malformed_file_token(_signed_pdf(original, pdf))

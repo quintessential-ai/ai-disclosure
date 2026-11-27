@@ -710,3 +710,23 @@ def test_content_with_a_lone_surrogate_verifies() -> None:
     )
 
     assert detect_html(content + marker, KEYS).verdict is Verdict.VERIFIED
+
+
+@pytest.mark.parametrize(
+    ("header", "error"),
+    [
+        ({"crit": ["b64"]}, "unsupported header members ['crit']"),
+        ({"b64": False, "jku": "https://x.test"}, "unsupported header members"),
+        ({"kid": 7}, "header kid is not a string"),
+        ({"alg": "HS256"}, "unsupported alg 'HS256'"),
+        ({"alg": "Ed25519"}, "unsupported alg 'Ed25519'"),
+    ],
+    ids=["crit", "b64-and-jku", "kid-not-a-string", "hs256", "ed25519-as-alg"],
+)
+def test_a_header_outside_the_profile_rejects_the_token(
+    header: dict[str, Any], error: str
+) -> None:
+    (finding,) = detect_html(_unsigned_body({}, header)).findings
+
+    assert finding.error is not None
+    assert finding.error.startswith(error)

@@ -870,13 +870,12 @@ this order:
 
 A fragment whose first line looks like a header field (`Note: …`) is read
 as a message first. When that message has no HTML body and no marker, the
-input is read again: as a PDF or Office file when its first 1024 bytes hold
-that signature (step 3), and that reading is reported if its token decodes,
-or if the input holds the file itself: for a PDF, a `%%EOF` after the header
-and before the marker; for an Office file, a package that opens. Failing
-that, it is read as an HTML body when it holds a tag, reported if it finds a
-marker, or if it is `unparseable` and the input holds `data-ai-disclosure`.
-Otherwise the message reading stands. So the guess never
+input is read again as an HTML body when it holds a tag, reported if it
+finds a marker, or if it is `unparseable` and the input holds
+`data-ai-disclosure`. If neither reading finds a marker and the input's
+first 1024 bytes hold `%PDF-` or `PK\x03\x04`, the input is ambiguous and
+is reported as unreadable (exit status 2): a PDF or Office file with text in
+front of it is checked once that text is removed. So the guess never
 turns a marked file or fragment into `no_marker`; the fragment's first line
 is text before its container, so its marker reads as quoted. A message whose
 MIME parts nest too deeply for the parser is reported as unreadable (exit status
