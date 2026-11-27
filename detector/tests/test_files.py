@@ -638,6 +638,107 @@ def test_a_header_like_line_before_an_unmarked_pdf_reads_as_the_message() -> Non
     assert detect_file(b"Note: x\n" + _PDF).verdict is Verdict.NONE
 
 
+def _corrupt_first_dot(token: bytes) -> bytes:
+    return token.replace(b".", b"!", 1)
+
+
+def test_a_header_like_line_before_a_pdf_keeps_its_malformed_marker(
+    pdf: bytes,
+) -> None:
+    token = _token_of_pdf(pdf)
+
+    _assert_one_malformed_file_token(
+        b"Note: x\n" + pdf.replace(token, _corrupt_first_dot(token))
+    )
+
+
+def test_a_header_like_line_before_an_office_file_keeps_its_malformed_marker(
+    docx: bytes,
+) -> None:
+    with zipfile.ZipFile(io.BytesIO(docx)) as zf:
+        custom = zf.read("docProps/custom.xml")
+    match = re.search(rb"<vt:lpwstr>([^<]+)</vt:lpwstr>", custom)
+    assert match is not None
+    token = match.group(1)
+    corrupt = _repack(
+        docx, {"docProps/custom.xml": custom.replace(token, _corrupt_first_dot(token))}
+    )
+
+    _assert_one_malformed_file_token(b"Note: x\n" + corrupt)
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"Note: x\nA %PDF-1.7 file carries /AIDisclosure (a!b.c) in its Info.\n",
+        # An end marker before the header is not a revision before the marker.
+        b"Note: x\n%%EOF then %PDF-1.7 with /AIDisclosure (a!b.c)\n",
+    ],
+    ids=["no-end-marker", "end-marker-before-header"],
+)
+def test_a_header_like_line_mentioning_a_pdf_and_the_property_has_no_marker(
+    data: bytes,
+) -> None:
+    assert detect_file(data).verdict is Verdict.NONE
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [b"/AIDisclosure\x00(", b"/AIDisclosure \x00 (", b"hex"],
+    ids=["nul-after-name", "nul-before-value", "nul-in-hex"],
+)
+def test_nul_is_pdf_whitespace_around_the_property(pdf: bytes, entry: bytes) -> None:
+    token = _token_of_pdf(pdf)
+    if entry == b"hex":
+        digits = token.hex().encode()
+        rewritten = pdf.replace(
+            b"(" + token + b")", b"<" + digits[:4] + b"\x00" + digits[4:] + b">"
+        )
+    else:
+        rewritten = pdf.replace(b"/AIDisclosure (", entry)
+    assert rewritten != pdf
+
+    verdict = detect_file(rewritten, KEYS).verdict
+    assert verdict is Verdict.VERIFIED_WITH_UNMARKED_CONTENT
+
+
+_NS_AI_DISCLOSURE = b"https://complexio.com/ns/ai-disclosure/1.0/"
+
+
+@pytest.mark.parametrize(
+    ("prefix", "namespace", "verdict"),
+    [
+        (b"ai", _NS_AI_DISCLOSURE, Verdict.NONE),
+        (b"cpxai", b"urn:other", Verdict.VERIFIED_WITH_UNMARKED_CONTENT),
+    ],
+    ids=["our-namespace-other-prefix", "our-prefix-other-namespace"],
+)
+def test_the_xmp_prefix_is_matched_as_written(
+    pdf: bytes, prefix: bytes, namespace: bytes, verdict: Verdict
+) -> None:
+    token = _token_of_pdf(pdf)
+    rewritten = pdf.replace(
+        b"/AIDisclosure (" + token + b")",
+        b'/Note (<rdf:Description xmlns:%b="%b" %b:AIDisclosure="%b"/>)'
+        % (prefix, namespace, prefix, token),
+    )
+    assert rewritten != pdf
+
+    assert detect_file(rewritten, KEYS).verdict is verdict
+
+
+def test_page_text_mentioning_the_property_before_a_string_fails_closed(
+    pdf: bytes,
+) -> None:
+    original = _PDF.replace(
+        b"trailer",
+        b"4 0 obj << /Length 34 >> stream\nBT (see /AIDisclosure (x)) Tj ET\n"
+        b"endstream endobj\ntrailer",
+    )
+
+    _assert_one_malformed_file_token(_signed_pdf(original, pdf))
+
+
 @pytest.mark.parametrize("part", ["docProps/custom.xml", "word/document.xml"])
 def test_an_entry_zipfile_cannot_extract_fails_closed(docx: bytes, part: str) -> None:
     # Version needed to extract 6.4, past what zipfile reads; zipfile checks

@@ -651,8 +651,14 @@ in the raw bytes and digests up to the last `%%EOF` that precedes it.
 - An occurrence followed by anything else (page text such as
   `(see /AIDisclosure) Tj`, a dictionary, an indirect reference) is skipped.
   A name that occurs but is never followed by a string is a malformed token.
+  The search does not parse page content or comments: a mention of the name
+  followed by a string there is read as the property, and the marker then
+  reads as malformed rather than verified.
 - In the XMP, the property is the complete QName `cpxai:AIDisclosure`, as an
-  element or an attribute, never the end of a longer QName.
+  element or an attribute, never the end of a longer QName. The `cpxai`
+  prefix is matched as written, not resolved to its namespace: the issuer
+  always writes `cpxai`, and a tool that rewrites the metadata under another
+  prefix leaves the marker unread there, as any rewrite of the metadata can.
 
 Any change to the generated revision breaks the digest. A later incremental
 update appended after the marker does not, and is not covered by it. A tool
@@ -805,16 +811,8 @@ that signs nothing else.
 | `signed_as_written` | Content as issued, `content_html`, and its `token`, signed with the test key | With `jwks`: a valid signature, the `content` result, the `verdict` and the first violation |
 | `detection` | `html_body`, an optional `header_token` (`X-Complexio-AI-Disclosure`) and `x_ai_generated` (`X-AI-Generated`), and `jwks`: whether the verifier holds the test key set or none | The `verdict`, `unmarked_content`, the first violation, and in order each marker's carrier, placement, signature and content results, whether its token was `rejected` (a malformed token, or a header or claims outside [Token](#token)) and whether it is in the `legacy` format |
 
-The `detection` vectors are mostly ways a marker must fail to verify: content
-changed, removed or not leading, a header token for other content, an
-unsupported canonicalisation, a forged signature, an unknown key,
-`alg: none` with or without a signature, `HS256` keyed with the public key,
-`Ed25519` as `alg`, `crit`, `b64`, `jku`, a `kid` that is not a string, a
-repeated header member or claim, `NaN`, a non-canonical signature spelling,
-each claim rule, unparseable tokens, an empty header or attribute, a forged
-hidden block beside a verifying header, token JSON nested 32 deep (read) and
-33 deep (rejected), an earlier-format marker, an `X-AI-Generated` header
-alone, and HTML nested too deep.
+The `detection` vectors are mostly ways a marker must fail to verify; each
+vector's name in `ai_disclosure_vectors.json` says what it tests.
 
 ## Reference implementation
 
@@ -873,9 +871,12 @@ this order:
 A fragment whose first line looks like a header field (`Note: …`) is read
 as a message first. When that message has no HTML body and no marker, the
 input is read again: as a PDF or Office file when its first 1024 bytes hold
-that signature (step 3), reported if its token decodes; failing that, as an
-HTML body when it holds a tag, reported if it finds a marker, or if it is
-`unparseable` and the input holds `data-ai-disclosure`. So the guess never
+that signature (step 3), and that reading is reported if its token decodes,
+or if the input holds the file itself: for a PDF, a `%%EOF` after the header
+and before the marker; for an Office file, a package that opens. Failing
+that, it is read as an HTML body when it holds a tag, reported if it finds a
+marker, or if it is `unparseable` and the input holds `data-ai-disclosure`.
+Otherwise the message reading stands. So the guess never
 turns a marked file or fragment into `no_marker`; the fragment's first line
 is text before its container, so its marker reads as quoted. A message whose
 MIME parts nest too deeply for the parser is reported as unreadable (exit status
