@@ -33,7 +33,7 @@ jobs:
         run: uv run --locked pytest
 
   static:
-    name: Lint, types, key set and licence (python-3.12)
+    name: Repository checks (python-3.12)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     defaults:

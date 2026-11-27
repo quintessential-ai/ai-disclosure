@@ -3,8 +3,8 @@
 Usage: python scripts/check_key_set.py [PATH]
 
 PATH defaults to ``public/.well-known/ai-disclosure-jwks.json`` in this
-repository. Exits 0 when the set is sound (an empty set is sound), 1 with one
-line per problem otherwise. The rules are those of KEYS.md.
+repository. Exits 0 when the set is sound, 1 with one line per problem
+otherwise. The rules are those of KEYS.md.
 """
 
 from __future__ import annotations

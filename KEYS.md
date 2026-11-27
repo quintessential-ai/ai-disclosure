@@ -4,9 +4,17 @@
 signed AI-disclosure markers. It is served at
 <https://ai-disclosure.complexio.com/.well-known/ai-disclosure-jwks.json>. It changes only
 through a reviewed pull request to this repository, approved by a code owner. The `Checks`
-workflow runs on every pull request and fails it if the file is over the 1 MiB checkers accept,
-is not valid JWKS, a key carries a private `d` member, a `kid` is not the key's RFC 7638
-thumbprint, a `kid` repeats, or `use` or `alg` is not `sig` or `EdDSA`.
+workflow runs on every pull request and fails it when the file:
+
+- is over the 1 MiB checkers accept, or is JSON the checkers refuse (a repeated member name,
+  `NaN` or `Infinity`, a number too large to read, a byte-order mark, nesting over 32 deep);
+- is not a JWKS document: a JSON object with a `keys` array;
+- has an entry that is not a JSON object, or is not an Ed25519 OKP key;
+- has a key with a private `d` member, a `use` other than `sig` or an `alg` other than `EdDSA`;
+- has a key without a `kid`, with a `kid` another entry repeats, or with a `kid` that is not its
+  RFC 7638 thumbprint;
+- has a key whose `x` is not a canonical Ed25519 public key, or that checkers would skip, such
+  as one whose `key_ops` does not include `verify`.
 
 ## What a key in the set means
 
