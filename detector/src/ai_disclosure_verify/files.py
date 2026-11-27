@@ -72,6 +72,7 @@ _PDF_PROPERTY = re.compile(
 )
 # Whitespace and comments between a key and its value.
 _PDF_SKIP = re.compile(rb"(?:" + _PDF_WHITESPACE + rb"|%[^\r\n]*)*")
+_HEX_DIGITS = re.compile(rb"[0-9A-Fa-f]*")
 # A literal string's parts: plain bytes, an escape, or a parenthesis.
 _PDF_LITERAL_PART = re.compile(rb"[^()\\]+|\\.|[()\\]", re.DOTALL)
 # A PDF literal string escape: a named character, up to three octal digits,
@@ -281,12 +282,10 @@ def ooxml_token(data: bytes) -> str | None:
 def pdf_token(data: bytes) -> tuple[str, bytes] | None:
     """The token in a PDF's Info dictionary or XMP, with the revision it was appended after.
 
-    Read from the raw bytes, so a token inside a compressed object stream
-    (a file re-saved by another tool) is not found. The token is the first
-    occurrence of the property that holds a string; an Info key followed by
-    anything else, such as a mention in page text, is skipped. A property
-    that never holds a string gives ``""``: it is still an attempt at a
-    marker.
+    Found as the specification's ``pdf-revision/1`` sets out, in the raw
+    bytes, so a token inside a compressed object stream is not found. A
+    property that is present always gives a token, ``""`` when it holds no
+    string: it is still an attempt at a marker.
     """
     position = 0
     first: re.Match[bytes] | None = None
@@ -359,11 +358,11 @@ def _pdf_hex(data: bytes, start: int) -> bytes:
     if end < 0:
         return b""
     digits = re.sub(_PDF_WHITESPACE, b"", data[start + 1 : end])
-    try:
-        # A final odd digit stands for that digit followed by 0.
-        return bytes.fromhex((digits + b"0" * (len(digits) % 2)).decode("ascii"))
-    except (UnicodeDecodeError, ValueError):
+    # bytes.fromhex would skip other whitespace, such as VT, that PDF does not.
+    if not _HEX_DIGITS.fullmatch(digits):
         return b""
+    # A final odd digit stands for that digit followed by 0.
+    return bytes.fromhex((digits + b"0" * (len(digits) % 2)).decode("ascii"))
 
 
 def _pdf_literal(raw: bytes) -> bytes:
