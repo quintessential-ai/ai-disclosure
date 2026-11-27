@@ -69,8 +69,8 @@ MAX_DOCUMENT_BYTES = 5 * 1024 * 1024
 MAX_DEPTH = 256
 MAX_ATTRIBUTES = 64
 # Each element costs html5lib up to a scan of the open elements, so a
-# document of nothing but tags runs to tens of seconds at the byte cap. Mail
-# with a large table stays well under it.
+# document of nothing but tags is slow at the byte cap. Mail with a large
+# table stays well under it.
 MAX_ELEMENTS = 200_000
 # html5lib builds text, attribute values, comments and names by appending to
 # a string, and places foster-parented content by scanning the foster
