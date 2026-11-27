@@ -1,0 +1,4 @@
+# Every change needs a code owner's review, the key set most of all: a wrong
+# edit stops every recipient verifying our mail, or vouches for a key we
+# don't hold.
+*    @quintessential-ai/cpx-pod-enterprise-automator @quintessential-ai/cpx-devopsengineer
