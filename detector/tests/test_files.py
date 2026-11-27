@@ -17,11 +17,13 @@ from helpers import (
     AllocationPeak,
     golden_jwks,
     golden_public_key,
+    golden_token,
     signed_vector_body,
 )
 
 from ai_disclosure_verify import Carrier, ContentCheck, Verdict, cli, files
 from ai_disclosure_verify.detect import MessageDecodeError, detect_file
+from ai_disclosure_verify.jws import decode_compact
 
 # Written by fixtures/generate_fixtures.py with the reference implementation.
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -456,6 +458,13 @@ def test_a_pdf_info_string_is_read_with_its_escapes_decoded(
         (b"<cpxai:AIDisclosure>a.b.c</cpxai:AIDisclosure>", "a.b.c"),
         (b"<cpxai:AIDisclosure/>a.b.c<", ""),
         (b"<rdf:Description cpxai:AIDisclosure='a.b.c'/>", "a.b.c"),
+        (b"/AI#44isclosure (a.b.c)", "a.b.c"),
+        (b"/AIDisclosure % note /AIDisclosure (x)\n(a.b.c)", "a.b.c"),
+        (b"(see /AIDisclosure) Tj /AIDisclosure (a.b.c)", "a.b.c"),
+        (b"/AIDisclosure 7 0 R /AIDisclosure (a.b.c)", "a.b.c"),
+        (b"/AIDisclosure <a.b.c>", ""),
+        (b"/AIDisclosure <612E", ""),
+        (b"/AIDisclosure (a.b.c", ""),
     ],
     ids=[
         "balanced-parens",
@@ -465,6 +474,13 @@ def test_a_pdf_info_string_is_read_with_its_escapes_decoded(
         "xmp-element",
         "self-closing-xmp",
         "xmp-attribute",
+        "escaped-name",
+        "comment-before-value",
+        "mention-skipped",
+        "reference-skipped",
+        "hex-not-hex",
+        "unterminated-hex",
+        "unterminated-literal",
     ],
 )
 def test_a_pdf_property_value_is_read_by_its_form(entry: bytes, value: str) -> None:
@@ -472,6 +488,112 @@ def test_a_pdf_property_value_is_read_by_its_form(entry: bytes, value: str) -> N
 
     assert found is not None
     assert found[0] == value
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"/AIDisclosure#41 (a.b.c)",
+        b"/AIDisclosureX (a.b.c)",
+        b'<rdf:Description xcpxai:AIDisclosure="a.b.c"/>',
+        b"<xcpxai:AIDisclosure>a.b.c</xcpxai:AIDisclosure>",
+    ],
+    ids=[
+        "longer-escaped-name",
+        "longer-name",
+        "longer-qname-attribute",
+        "longer-qname-element",
+    ],
+)
+def test_a_longer_name_is_not_the_pdf_property(data: bytes) -> None:
+    assert files.pdf_token(_PDF + data) is None
+
+
+def _token_of_pdf(marked: bytes) -> bytes:
+    return marked.split(b"/AIDisclosure (")[1].split(b")")[0]
+
+
+def test_a_signed_token_written_as_a_bare_hex_value_does_not_verify(
+    pdf: bytes,
+) -> None:
+    token = _token_of_pdf(pdf)
+    rewritten = pdf.replace(b"(" + token + b")", b"<" + token + b">")
+    assert rewritten != pdf
+
+    _assert_one_malformed_file_token(rewritten)
+
+
+def test_an_escaped_property_name_before_the_marker_is_the_one_read(
+    pdf: bytes,
+) -> None:
+    marked = pdf.replace(
+        b"/AIDisclosure (", b"/AI#44isclosure (bad) /AIDisclosure (", 1
+    )
+    assert marked != pdf
+
+    _assert_one_malformed_file_token(marked)
+
+
+def test_a_token_under_a_longer_xmp_qname_is_not_found(pdf: bytes) -> None:
+    token = _token_of_pdf(pdf)
+    rewritten = pdf.replace(
+        b"/AIDisclosure (" + token + b")",
+        b'/Note (<rdf:Description xcpxai:AIDisclosure="' + token + b'"/>)',
+    )
+    assert rewritten != pdf
+
+    assert detect_file(rewritten, KEYS).verdict is Verdict.NONE
+
+
+def _signed_pdf(original: bytes, fixture: bytes) -> bytes:
+    """``original`` marked as an incremental update, with the fixture's claims."""
+    found = files.pdf_token(fixture)
+    assert found is not None
+    revision = original[: original.rindex(b"%%EOF") + len(b"%%EOF")]
+    claims = {
+        **decode_compact(found[0]).payload,
+        "content_sha256": files.pdf_digest(revision),
+    }
+    token = golden_token(claims).encode()
+    return original + (
+        b"3 0 obj << /AIDisclosure (" + token + b") >> endobj\n"
+        b"trailer << /Info 3 0 R >>\n%%EOF\n"
+    )
+
+
+@pytest.mark.parametrize("page_text", [b"", b"BT (see /AIDisclosure) Tj ET"])
+def test_page_text_that_mentions_the_property_hides_no_marker(
+    pdf: bytes, page_text: bytes
+) -> None:
+    stream = b"4 0 obj << /Length 30 >> stream\n" + page_text + b"\nendstream endobj\n"
+    original = _PDF.replace(b"trailer", stream + b"trailer")
+
+    report = detect_file(_signed_pdf(original, pdf), KEYS)
+
+    assert report.verdict is Verdict.VERIFIED_WITH_UNMARKED_CONTENT
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b'Note: PK\x03\x04\n<div data-ai-disclosure=""></div>',
+        b'Note: %PDF-1.7\n<div data-ai-disclosure="x"></div>',
+    ],
+    ids=["zip", "pdf"],
+)
+def test_a_failed_file_guess_still_reads_the_fragment_as_html(data: bytes) -> None:
+    assert detect_file(data).verdict is Verdict.UNVERIFIED
+
+
+def test_a_message_that_mentions_a_pdf_and_the_property_reads_as_the_message(
+    tmp_path: Path,
+) -> None:
+    data = b"Subject: x\n\nA %PDF-1.7 file carries /AIDisclosure (x) in its Info.\n"
+
+    assert detect_file(data).verdict is Verdict.NONE
+    path = tmp_path / "note.eml"
+    path.write_bytes(data)
+    assert cli.main([str(path), "--offline"]) == cli.EXIT_NO_MARKER
 
 
 def test_only_the_first_pdf_property_is_read() -> None:

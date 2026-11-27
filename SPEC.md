@@ -639,12 +639,20 @@ digest; changing any part's content (text, numbers, styles, images) breaks it.
 The marker is written as an incremental update, after the file as generated.
 `content_sha256` is the unpadded base64url SHA-256 of the file's bytes up to
 and including the last `%%EOF` before that update. A verifier finds the token
-in the raw bytes and digests up to the last `%%EOF` that precedes it. The
-first occurrence of the property is read: the `/AIDisclosure` key, the
-`cpxai:AIDisclosure` element, or its XMP attribute form. An Info value is a
-PDF string, literal (escapes decoded, as a writer may write any byte as one,
-`.` as `\056`; balanced parentheses kept) or hexadecimal. A property with
-any other value, or none, is present without a token.
+in the raw bytes and digests up to the last `%%EOF` that precedes it.
+
+- Names compare after their `#xx` escapes are decoded (ISO 32000-1 §7.3.5),
+  as whole names: `/AI#44isclosure` is the property, `/AIDisclosureX` is not.
+- The token is the first occurrence of that name followed, after whitespace
+  and comments, by a string: a literal string, with its escapes decoded (a
+  writer can write any byte as one, `.` as `\056`) and balanced parentheses
+  kept, or a hexadecimal string. A hexadecimal string whose digits are not
+  hex is a malformed token.
+- An occurrence followed by anything else (page text such as
+  `(see /AIDisclosure) Tj`, a dictionary, an indirect reference) is skipped.
+  A name that occurs but is never followed by a string is a malformed token.
+- In the XMP, the property is the complete QName `cpxai:AIDisclosure`, as an
+  element or an attribute, never the end of a longer QName.
 
 Any change to the generated revision breaks the digest. A later incremental
 update appended after the marker does not, and is not covered by it. A tool
@@ -865,7 +873,7 @@ this order:
 A fragment whose first line looks like a header field (`Note: …`) is read
 as a message first. When that message has no HTML body and no marker, the
 input is read again: as a PDF or Office file when its first 1024 bytes hold
-that signature (step 3), reported if it finds a marker; failing that, as an
+that signature (step 3), reported if its token decodes; failing that, as an
 HTML body when it holds a tag, reported if it finds a marker, or if it is
 `unparseable` and the input holds `data-ai-disclosure`. So the guess never
 turns a marked file or fragment into `no_marker`; the fragment's first line

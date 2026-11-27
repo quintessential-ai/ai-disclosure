@@ -50,15 +50,25 @@ MAX_XML_PART_BYTES = 4 * 1024 * 1024
 _PACKAGE_COMPRESSION = frozenset({zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED})
 _READ_CHUNK = 64 * 1024
 _EOF = b"%%EOF"
-# Where the property is: the Info key as a whole PDF name, the XMP element,
-# or the XMP attribute form. Only the first is read, so its value is parsed
-# once whatever else the file holds.
+
+
+def _pdf_name_pattern(name: str) -> bytes:
+    """A PDF name's characters, each as written or ``#xx``-escaped (ISO 32000-1, 7.3.5)."""
+    return b"".join(
+        b"(?:" + re.escape(char.encode()) + f"|#(?i:{ord(char):02x}))".encode()
+        for char in name
+    )
+
+
+# Where the property can be: the Info key as a whole name once its escapes are
+# decoded, or the complete XMP QName as an element or an attribute.
 _PDF_PROPERTY = re.compile(
-    rb"/" + FILE_PROPERTY.encode() + rb"(?=[\s()<>\[\]{}/%]|$)"
+    rb"/" + _pdf_name_pattern(FILE_PROPERTY) + rb"(?=[\s()<>\[\]{}/%]|$)"
     rb"|<cpxai:" + FILE_PROPERTY.encode() + rb"(?=[\s/>])"
-    rb"|cpxai:" + FILE_PROPERTY.encode() + rb"\s*=\s*([\"'])"
+    rb"|(?<=\s)cpxai:" + FILE_PROPERTY.encode() + rb"\s*=\s*([\"'])"
 )
-_PDF_SPACE = re.compile(rb"\s*")
+# Whitespace and comments between a key and its value.
+_PDF_SKIP = re.compile(rb"(?:\s|%[^\r\n]*)*")
 # A literal string's parts: plain bytes, an escape, or a parenthesis.
 _PDF_LITERAL_PART = re.compile(rb"[^()\\]+|\\.|[()\\]", re.DOTALL)
 # A PDF literal string escape: a named character, up to three octal digits,
@@ -269,15 +279,26 @@ def pdf_token(data: bytes) -> tuple[str, bytes] | None:
     """The token in a PDF's Info dictionary or XMP, with the revision it was appended after.
 
     Read from the raw bytes, so a token inside a compressed object stream
-    (a file re-saved by another tool) is not found. A property that is
-    present with no string value gives ``""``: it is still an attempt at a
+    (a file re-saved by another tool) is not found. The token is the first
+    occurrence of the property that holds a string; an Info key followed by
+    anything else, such as a mention in page text, is skipped. A property
+    that never holds a string gives ``""``: it is still an attempt at a
     marker.
     """
-    match = _PDF_PROPERTY.search(data)
-    if match is None:
+    position = 0
+    first: re.Match[bytes] | None = None
+    while (match := _PDF_PROPERTY.search(data, position)) is not None:
+        first = first or match
+        value, position = _pdf_property_value(data, match)
+        if value is not None:
+            return _pdf_found(data, value, match.start())
+    if first is None:
         return None
-    value = _pdf_property_value(data, match)
-    end = data.rfind(_EOF, 0, match.start())
+    return _pdf_found(data, b"", first.start())
+
+
+def _pdf_found(data: bytes, value: bytes, start: int) -> tuple[str, bytes]:
+    end = data.rfind(_EOF, 0, start)
     # A byte outside ASCII cannot be in a token; replaced, it reads as malformed.
     return (
         value.decode("ascii", errors="replace"),
@@ -285,30 +306,39 @@ def pdf_token(data: bytes) -> tuple[str, bytes] | None:
     )
 
 
-def _pdf_property_value(data: bytes, match: re.Match[bytes]) -> bytes:
-    """The bytes of the property ``match`` found, or ``b""`` when it holds no string."""
+def _pdf_property_value(
+    data: bytes, match: re.Match[bytes]
+) -> tuple[bytes | None, int]:
+    """The property's value, or None when this occurrence holds no string, and where to search on.
+
+    An unterminated string is a value, ``b""``: searching past it would let
+    each later occurrence rescan the rest of the file.
+    """
     quote_mark = match.group(1)
     if quote_mark is not None:
         close = data.find(quote_mark, match.end())
-        return data[match.end() : close] if close >= 0 else b""
+        return (data[match.end() : close] if close >= 0 else b""), len(data)
     if match.group().startswith(b"<"):
         tag_end = data.find(b">", match.end())
         if tag_end < 0 or data[tag_end - 1 : tag_end] == b"/":
-            return b""
+            return b"", len(data)
         text_end = data.find(b"<", tag_end + 1)
-        return data[tag_end + 1 : text_end] if text_end >= 0 else b""
-    start = _PDF_SPACE.match(data, match.end())
-    position = start.end() if start else match.end()
+        return (data[tag_end + 1 : text_end] if text_end >= 0 else b""), len(data)
+    skipped = _PDF_SKIP.match(data, match.end())
+    position = skipped.end() if skipped else match.end()
     if data[position : position + 1] == b"(":
         # A writer may escape any byte of an Info string, pypdf the dots as \056.
-        return _pdf_literal(_pdf_literal_body(data, position))
+        body = _pdf_literal_body(data, position)
+        return (_pdf_literal(body) if body is not None else b""), len(data)
     if data[position : position + 2] != b"<<" and data[position : position + 1] == b"<":
-        return _pdf_hex(data, position)
-    return b""
+        return _pdf_hex(data, position), len(data)
+    # Not a string: a mention in text, a dictionary or an indirect reference.
+    # Searching on from after the comments skips names inside them.
+    return None, position
 
 
-def _pdf_literal_body(data: bytes, start: int) -> bytes:
-    """A literal string's body, balanced parentheses kept, or ``b""`` when it never closes."""
+def _pdf_literal_body(data: bytes, start: int) -> bytes | None:
+    """A literal string's body, balanced parentheses kept, or None when it never closes."""
     depth = 0
     for part in _PDF_LITERAL_PART.finditer(data, start):
         if part.group() == b"(":
@@ -317,11 +347,11 @@ def _pdf_literal_body(data: bytes, start: int) -> bytes:
             depth -= 1
             if depth == 0:
                 return data[start + 1 : part.start()]
-    return b""
+    return None
 
 
 def _pdf_hex(data: bytes, start: int) -> bytes:
-    """A hexadecimal string's bytes (ISO 32000-1, 7.3.4.3), or its text when it is not hex."""
+    """A hexadecimal string's bytes (ISO 32000-1, 7.3.4.3), or ``b""`` when it is not hex."""
     end = data.find(b">", start)
     if end < 0:
         return b""
@@ -330,7 +360,7 @@ def _pdf_hex(data: bytes, start: int) -> bytes:
         # A final odd digit stands for that digit followed by 0.
         return bytes.fromhex((digits + b"0" * (len(digits) % 2)).decode("ascii"))
     except (UnicodeDecodeError, ValueError):
-        return digits
+        return b""
 
 
 def _pdf_literal(raw: bytes) -> bytes:
