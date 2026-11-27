@@ -577,7 +577,7 @@ def detect_file(
     marker is read again as a PDF or Office file when its first 1024 bytes
     hold that signature, else as HTML when it holds a tag, such as a fragment
     that starts ``Note: ...``. The file reading is reported when it finds a
-    marker; the HTML one when it finds a marker, or when it is
+    marker, and is dropped when the file cannot be read; the HTML one when it finds a marker, or when it is
     ``unparseable`` and the input holds ``data-ai-disclosure``. So the guess
     never hides a marker as ``no_marker``.
 
@@ -627,7 +627,11 @@ def _detect_header_led(
     window = data[:_SIGNATURE_WINDOW]
     if b"%PDF-" in window or b"PK\x03\x04" in window:
         detect = _detect_pdf if b"%PDF-" in window else _detect_ooxml
-        as_file = detect(data, keys)
+        try:
+            as_file = detect(data, keys)
+        except MessageDecodeError:
+            # A message that only mentions a signature: the guess was wrong.
+            return report
         return as_file if as_file.findings else report
     if not _HTML_TAG.search(text):
         return report

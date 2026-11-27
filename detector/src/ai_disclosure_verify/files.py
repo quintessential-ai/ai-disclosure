@@ -50,14 +50,17 @@ MAX_XML_PART_BYTES = 4 * 1024 * 1024
 _PACKAGE_COMPRESSION = frozenset({zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED})
 _READ_CHUNK = 64 * 1024
 _EOF = b"%%EOF"
-# Any value, so an empty or malformed one is found and read as a malformed
-# token. Each match stops at the next unescaped parenthesis or tag, which
-# every later occurrence starts with, so a file full of them is scanned once.
-_PDF_TOKEN = re.compile(
-    rb"/" + FILE_PROPERTY.encode() + rb"\s*\(((?:[^()\\]|\\.)*)\)"
-    rb"|<cpxai:" + FILE_PROPERTY.encode() + rb">([^<]*)<",
-    re.DOTALL,
+# Where the property is: the Info key as a whole PDF name, the XMP element,
+# or the XMP attribute form. Only the first is read, so its value is parsed
+# once whatever else the file holds.
+_PDF_PROPERTY = re.compile(
+    rb"/" + FILE_PROPERTY.encode() + rb"(?=[\s()<>\[\]{}/%]|$)"
+    rb"|<cpxai:" + FILE_PROPERTY.encode() + rb"(?=[\s/>])"
+    rb"|cpxai:" + FILE_PROPERTY.encode() + rb"\s*=\s*([\"'])"
 )
+_PDF_SPACE = re.compile(rb"\s*")
+# A literal string's parts: plain bytes, an escape, or a parenthesis.
+_PDF_LITERAL_PART = re.compile(rb"[^()\\]+|\\.|[()\\]", re.DOTALL)
 # A PDF literal string escape: a named character, up to three octal digits,
 # or a backslash before a line break, which continues the string.
 _PDF_ESCAPE = re.compile(rb"\\([0-7]{1,3}|\r\n|.)", re.DOTALL)
@@ -266,20 +269,68 @@ def pdf_token(data: bytes) -> tuple[str, bytes] | None:
     """The token in a PDF's Info dictionary or XMP, with the revision it was appended after.
 
     Read from the raw bytes, so a token inside a compressed object stream
-    (a file re-saved by another tool) is not found.
+    (a file re-saved by another tool) is not found. A property that is
+    present with no string value gives ``""``: it is still an attempt at a
+    marker.
     """
-    match = _PDF_TOKEN.search(data)
+    match = _PDF_PROPERTY.search(data)
     if match is None:
         return None
-    literal = match.group(1)
-    # A writer may escape any byte of an Info string, pypdf the dots as \056.
-    token = _pdf_literal(literal) if literal is not None else match.group(2)
+    value = _pdf_property_value(data, match)
     end = data.rfind(_EOF, 0, match.start())
     # A byte outside ASCII cannot be in a token; replaced, it reads as malformed.
     return (
-        token.decode("ascii", errors="replace"),
+        value.decode("ascii", errors="replace"),
         data[: end + len(_EOF)] if end >= 0 else b"",
     )
+
+
+def _pdf_property_value(data: bytes, match: re.Match[bytes]) -> bytes:
+    """The bytes of the property ``match`` found, or ``b""`` when it holds no string."""
+    quote_mark = match.group(1)
+    if quote_mark is not None:
+        close = data.find(quote_mark, match.end())
+        return data[match.end() : close] if close >= 0 else b""
+    if match.group().startswith(b"<"):
+        tag_end = data.find(b">", match.end())
+        if tag_end < 0 or data[tag_end - 1 : tag_end] == b"/":
+            return b""
+        text_end = data.find(b"<", tag_end + 1)
+        return data[tag_end + 1 : text_end] if text_end >= 0 else b""
+    start = _PDF_SPACE.match(data, match.end())
+    position = start.end() if start else match.end()
+    if data[position : position + 1] == b"(":
+        # A writer may escape any byte of an Info string, pypdf the dots as \056.
+        return _pdf_literal(_pdf_literal_body(data, position))
+    if data[position : position + 2] != b"<<" and data[position : position + 1] == b"<":
+        return _pdf_hex(data, position)
+    return b""
+
+
+def _pdf_literal_body(data: bytes, start: int) -> bytes:
+    """A literal string's body, balanced parentheses kept, or ``b""`` when it never closes."""
+    depth = 0
+    for part in _PDF_LITERAL_PART.finditer(data, start):
+        if part.group() == b"(":
+            depth += 1
+        elif part.group() == b")":
+            depth -= 1
+            if depth == 0:
+                return data[start + 1 : part.start()]
+    return b""
+
+
+def _pdf_hex(data: bytes, start: int) -> bytes:
+    """A hexadecimal string's bytes (ISO 32000-1, 7.3.4.3), or its text when it is not hex."""
+    end = data.find(b">", start)
+    if end < 0:
+        return b""
+    digits = re.sub(rb"\s", b"", data[start + 1 : end])
+    try:
+        # A final odd digit stands for that digit followed by 0.
+        return bytes.fromhex((digits + b"0" * (len(digits) % 2)).decode("ascii"))
+    except (UnicodeDecodeError, ValueError):
+        return digits
 
 
 def _pdf_literal(raw: bytes) -> bytes:
