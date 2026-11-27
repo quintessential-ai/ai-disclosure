@@ -101,8 +101,7 @@ def main(argv: list[str]) -> int:
         print(f"{path}: larger than {MAX_JWKS_BYTES} bytes", file=sys.stderr)
         return 1
     try:
-        # The checkers' own parser: a set they would refuse, say for a
-        # repeated member name, fails here too.
+        # The checkers' own parser, so a set they would refuse fails here too.
         document = parse_json(data)
     except ValueError as exc:
         print(f"{path}: not valid JSON: {exc}", file=sys.stderr)
