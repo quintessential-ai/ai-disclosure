@@ -6,13 +6,18 @@ import base64
 import hashlib
 import io
 import json
-import tracemalloc
 import zipfile
 from pathlib import Path
 from typing import Any
 
 import pytest
-from helpers import GOLDEN_KID, golden_jwks, golden_public_key, signed_vector_body
+from helpers import (
+    GOLDEN_KID,
+    AllocationPeak,
+    golden_jwks,
+    golden_public_key,
+    signed_vector_body,
+)
 
 from ai_disclosure_verify import ContentCheck, Verdict, cli, files
 from ai_disclosure_verify.detect import MessageDecodeError, detect_file
@@ -200,15 +205,11 @@ def test_a_part_declaring_less_than_it_holds_is_read_only_that_far(
         _repack(docx, {"word/document.xml": bytes(big)}), "word/document.xml", 1
     )
 
-    tracemalloc.start()
-    try:
+    with AllocationPeak() as peak:
         with pytest.raises(zipfile.BadZipFile, match="CRC"):
             files.ooxml_digest(lying)
-        _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
 
-    assert peak < big // 8
+    assert peak.bytes < big // 8
 
 
 def _spec_digest(package: bytes) -> str:
@@ -234,15 +235,11 @@ def test_a_large_part_is_hashed_without_holding_it() -> None:
     package = buf.getvalue()
     expected = _spec_digest(package)
 
-    tracemalloc.start()
-    try:
+    with AllocationPeak() as peak:
         digest = files.ooxml_digest(package)
-        _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
 
     assert digest == expected
-    assert peak < big // 16
+    assert peak.bytes < big // 16
 
 
 @pytest.mark.parametrize("part", ["[Content_Types].xml", "_rels/.rels"])

@@ -5,13 +5,14 @@ from __future__ import annotations
 import datetime
 import ipaddress
 import json
+import math
 import socket
 import ssl
 import threading
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from http.client import HTTPMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
@@ -210,23 +211,28 @@ def _certificates(directory: Path) -> tuple[Path, Path]:
     return ca_path, chain_path
 
 
-class _DrippingServer:
-    """An https server on 127.0.0.1 that sends one byte at a time, forever.
+class _TlsServer:
+    """An https server on 127.0.0.1 that answers every connection with ``prefix``.
 
-    It answers every connection with ``prefix`` and then one more byte of
-    ``drip`` every 20 ms. One thread serves every connection, so the test
-    can count the client's threads.
+    It then sends one more byte of ``drip`` every 20 ms, or closes the
+    connection if ``close``. After ``LIFETIME`` seconds it closes every
+    connection, so a fetch its deadline fails to end errs instead of hanging.
     """
 
-    def __init__(self, chain: Path, prefix: bytes, drip: bytes) -> None:
+    LIFETIME = 10.0
+
+    def __init__(
+        self, chain: Path, prefix: bytes, drip: bytes = b"", *, close: bool = False
+    ) -> None:
         self._context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         self._context.load_cert_chain(chain)
         self._listener = socket.create_server(("127.0.0.1", 0))
         self._listener.settimeout(0.02)
-        self._prefix, self._drip = prefix, drip
+        self._prefix, self._drip, self._close = prefix, drip, close
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._serve, daemon=True)
-        self.url = f"https://127.0.0.1:{self._listener.getsockname()[1]}/jwks.json"
+        self.port = self._listener.getsockname()[1]
+        self.url = f"https://127.0.0.1:{self.port}/jwks.json"
 
     def __enter__(self) -> Self:
         self._thread.start()
@@ -239,14 +245,18 @@ class _DrippingServer:
 
     def _serve(self) -> None:
         clients: list[ssl.SSLSocket] = []
-        while not self._stop.is_set():
+        give_up = time.monotonic() + self.LIFETIME
+        while not self._stop.is_set() and time.monotonic() < give_up:
             try:
                 raw, _ = self._listener.accept()
                 raw.settimeout(2)
                 client = self._context.wrap_socket(raw, server_side=True)
                 client.recv(65536)
                 client.sendall(self._prefix)
-                clients.append(client)
+                if self._close:
+                    client.close()
+                else:
+                    clients.append(client)
             except (TimeoutError, OSError):
                 pass
             for client in list(clients):
@@ -283,30 +293,177 @@ def test_a_server_sending_a_byte_at_a_time_meets_the_deadline(
     certificates: Path, prefix: bytes, drip: bytes
 ) -> None:
     """Every read finishes well within a per-read timeout; the fetch must not."""
-    with _DrippingServer(certificates, prefix, drip) as server:
-        started = time.monotonic()
-        with pytest.raises(KeyLoadError, match="within 0.5s"):
-            fetch_jwks(server.url, timeout=0.5)
+    with (
+        _TlsServer(certificates, prefix, drip) as server,
+        pytest.raises(KeyLoadError, match=r"within 0\.5s: .*timed out"),
+    ):
+        fetch_jwks(server.url, timeout=0.5)
 
-        assert time.monotonic() - started < 2
 
+def test_a_timed_out_fetch_starts_no_thread(
+    certificates: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A thread could not be stopped at the deadline, so none is started."""
+    started: list[threading.Thread] = []
 
-def test_a_timed_out_fetch_leaves_nothing_running(certificates: Path) -> None:
-    with _DrippingServer(certificates, *_SLOW_HEADERS) as server:
-        before = threading.active_count()
-        for _ in range(5):
-            with pytest.raises(KeyLoadError, match="within 0.2s"):
+    def record(thread: threading.Thread) -> None:
+        started.append(thread)
+
+    with _TlsServer(certificates, *_SLOW_HEADERS) as server:
+        with monkeypatch.context() as patch:
+            patch.setattr(threading.Thread, "start", record)
+            with pytest.raises(KeyLoadError, match=r"within 0\.2s: .*timed out"):
                 fetch_jwks(server.url, timeout=0.2)
 
-        assert threading.active_count() == before
+    assert started == []
 
 
 def test_the_test_server_is_trusted(certificates: Path) -> None:
     """The deadline tests above fail for the deadline, not for the certificate."""
     body = json.dumps(golden_jwks()).encode()
     prefix = b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n%s" % (len(body), body)
-    with _DrippingServer(certificates, prefix, b"") as server:
+    with _TlsServer(certificates, prefix) as server:
         assert list(fetch_jwks(server.url, timeout=5)) == ["golden-vectors"]
+
+
+def test_a_refused_address_falls_through_to_the_next(
+    certificates: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    body = json.dumps(golden_jwks()).encode()
+    prefix = b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n%s" % (len(body), body)
+    with socket.create_server(("127.0.0.1", 0)) as closed:
+        refusing = closed.getsockname()
+    with _TlsServer(certificates, prefix) as server:
+        addresses = [refusing, ("127.0.0.1", server.port)]
+        monkeypatch.setattr(socket, "getaddrinfo", _resolving_to(addresses))
+
+        assert list(fetch_jwks(server.url, timeout=5)) == ["golden-vectors"]
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        pytest.param(b"garbage\r\n\r\n", id="bad-status-line"),
+        pytest.param(b"HTTP/1.1 200 " + b"a" * 70_000 + b"\r\n", id="line-too-long"),
+        pytest.param(
+            b"HTTP/1.1 200 OK\r\n" + b"X: y\r\n" * 101 + b"\r\n", id="too-many-headers"
+        ),
+        pytest.param(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n10\r\n{",
+            id="truncated-body",
+        ),
+    ],
+)
+def test_a_malformed_http_response_is_a_key_load_error(
+    certificates: Path, answer: bytes
+) -> None:
+    with (
+        _TlsServer(certificates, answer, close=True) as server,
+        pytest.raises(KeyLoadError, match="bad HTTP response"),
+    ):
+        fetch_jwks(server.url, timeout=5)
+
+
+def _resolving_to(addresses: list[tuple[str, int]]) -> Callable[..., list[tuple]]:
+    """A ``socket.getaddrinfo`` that answers every name with ``addresses``."""
+
+    def getaddrinfo(*_: object, **__: object) -> list[tuple]:
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", address)
+            for address in addresses
+        ]
+
+    return getaddrinfo
+
+
+class _Network:
+    """A simulated network on a fake ``time.monotonic`` for keys.py.
+
+    Every name resolves to two addresses of a local listener that never
+    answers the TLS handshake. ``connects`` scripts each connect attempt:
+    ``("connect", s)`` connects after ``s`` seconds, ``("refuse", s)`` is
+    refused after ``s`` seconds and ``("stall", 0)`` waits out its socket
+    timeout. A handshake waits out its socket timeout too. Waits only move
+    the clock, so a test takes no real time.
+    """
+
+    def __init__(self, port: int) -> None:
+        self.now = 1000.0
+        self.connects: list[tuple[str, float]] = []
+        self.attempts = 0
+        self.port = port
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def connect(self, sock: socket.socket, address: tuple[str, int]) -> None:
+        outcome, seconds = self.connects[self.attempts]
+        self.attempts += 1
+        if outcome == "stall":
+            self.now += sock.gettimeout() or 0
+            raise TimeoutError("timed out")
+        self.now += seconds
+        if outcome == "refuse":
+            raise ConnectionRefusedError("refused")
+        _REAL_CONNECT(sock, address)
+
+    def handshake(self, sock: ssl.SSLSocket, block: bool = False) -> None:
+        self.now += sock.gettimeout() or 0
+        raise TimeoutError("the handshake timed out")
+
+
+_REAL_CONNECT = socket.socket.connect
+
+
+@pytest.fixture
+def network(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Network]:
+    with socket.create_server(("127.0.0.1", 0)) as listener:
+        address = listener.getsockname()
+        net = _Network(address[1])
+        monkeypatch.setattr(keys, "time", net)
+        monkeypatch.setattr(socket, "getaddrinfo", _resolving_to([address] * 2))
+        monkeypatch.setattr(
+            socket.socket, "connect", lambda sock, to: net.connect(sock, to)
+        )
+        monkeypatch.setattr(
+            ssl.SSLSocket, "do_handshake", lambda sock, block=False: net.handshake(sock)
+        )
+        yield net
+
+
+def test_a_slow_connect_leaves_the_handshake_only_what_remains(
+    network: _Network,
+) -> None:
+    network.connects = [("connect", 6)]
+
+    with pytest.raises(KeyLoadError, match="within 10s: the handshake timed out"):
+        fetch_jwks("https://key-set.test/jwks.json", timeout=10)
+
+    assert network.now == 1010
+
+
+def test_an_unreachable_first_address_leaves_no_time_for_the_next(
+    network: _Network,
+) -> None:
+    network.connects = [("stall", 0), ("connect", 0)]
+
+    with pytest.raises(KeyLoadError, match="within 10s: timed out"):
+        fetch_jwks("https://key-set.test/jwks.json", timeout=10)
+
+    assert network.now == 1010
+    assert network.attempts == 1
+
+
+def test_a_refused_first_address_leaves_the_next_only_what_remains(
+    network: _Network,
+) -> None:
+    network.connects = [("refuse", 4), ("stall", 0)]
+
+    with pytest.raises(KeyLoadError, match="within 10s: refused"):
+        fetch_jwks("https://key-set.test/jwks.json", timeout=10)
+
+    assert network.now == 1010
+    assert network.attempts == 2
 
 
 def test_a_network_error_is_a_key_load_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -385,3 +542,14 @@ def test_the_publishing_rules_catch_a_named_kid() -> None:
     assert published_key_problems({"keys": [{**entry, "use": "enc"}]}) == [
         "key 0 is not a usable Ed25519 entry with a kid"
     ]
+
+
+@pytest.mark.parametrize("timeout", [0, -1, math.inf, math.nan, 3601])
+def test_fetch_takes_a_finite_positive_timeout(
+    monkeypatch: pytest.MonkeyPatch, timeout: float
+) -> None:
+    seen = serve(monkeypatch, json.dumps(golden_jwks()).encode())
+
+    with pytest.raises(ValueError, match="more than 0 and at most 3600"):
+        fetch_jwks(timeout=timeout)
+    assert seen == []

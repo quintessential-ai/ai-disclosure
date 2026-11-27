@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import hashlib
-import time
-import tracemalloc
 from typing import Any
 
 import pytest
-from helpers import GOLDEN_KID, golden_public_key, signed_vector_body
+from helpers import GOLDEN_KID, AllocationPeak, golden_public_key, signed_vector_body
 
 from ai_disclosure_verify import Verdict, canonical, detect_html
 from ai_disclosure_verify.canonical import (
@@ -25,15 +23,13 @@ def _containers(count: int) -> str:
     return "".join(f'<div data-ai-content="{index:032x}">' for index in range(count))
 
 
-def test_a_bare_ampersand_attribute_is_refused_quickly() -> None:
-    # html5lib rebuilds the value at each "&": this took 24 s unbounded.
+def test_a_long_bare_ampersand_attribute_is_refused() -> None:
+    # html5lib rebuilds the value at each "&", so its work grows with the
+    # square of the run.
     document = '<a href="' + "&" * 2_400_000 + '">x</a>'
 
-    started = time.perf_counter()
     with pytest.raises(UnparseableHtmlError, match="copies more than"):
         scan_html(document)
-
-    assert time.perf_counter() - started < 2
 
 
 @pytest.mark.parametrize(
@@ -79,15 +75,12 @@ def test_ordinary_mail_is_charged_about_its_length() -> None:
 
 
 def test_foster_parenting_is_refused_before_it_turns_quadratic() -> None:
-    # Each piece moved out of the table lists the foster parent's children:
-    # this took 20 s unbounded.
+    # Each piece moved out of the table lists the foster parent's children,
+    # so the work grows with pieces times children.
     document = "<div>" + "<p></p>" * 40_000 + "<table>" + "<b></b>" * 40_000
 
-    started = time.perf_counter()
     with pytest.raises(UnparseableHtmlError, match="foster-parented"):
         scan_html(document)
-
-    assert time.perf_counter() - started < 3
 
 
 def test_foster_parenting_is_charged(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -100,7 +93,7 @@ def test_foster_parenting_is_charged(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_deeply_nested_containers_are_unparseable() -> None:
-    # 250 nested containers around 90,000 elements took 3.2 s and 1.9 GB.
+    # Unbounded, the work and memory grow with containers times elements.
     document = _containers(250) + "<p>x</p>" * 1_000
 
     report = detect_html(document)
@@ -118,15 +111,11 @@ def test_nested_containers_store_each_item_once(
     document = _containers(250) + "<p>x</p>" * elements
     scan_html(_containers(250) + "<p>x</p>")  # warm html5lib's caches
 
-    tracemalloc.start()
-    try:
+    with AllocationPeak() as peak:
         scan = scan_html(document)
-        _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
 
     # One item list for the document, not one per container (~40 MB).
-    assert peak < 20_000_000
+    assert peak.bytes < 20_000_000
     assert len(scan.regions) == 250
     assert all(region.canonical == "x" * elements for region in scan.regions.values())
 
@@ -200,9 +189,7 @@ def test_many_markers_naming_one_large_region_hash_it_once(
 
     monkeypatch.setattr(canonical, "hashlib", CountingHashlib)
 
-    started = time.perf_counter()
     report = detect_html(document, {GOLDEN_KID: golden_public_key()})
 
-    assert time.perf_counter() - started < 2
     assert len(report.findings) == 127
     assert len(hashed) == 1

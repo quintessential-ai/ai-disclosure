@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import base64
 import json
-import time
-from collections.abc import Mapping
+import re
+from collections.abc import Iterator, Mapping
 from typing import Any
 
 import pytest
@@ -18,6 +18,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
+from ai_disclosure_verify import jws
 from ai_disclosure_verify.jws import (
     JwksError,
     MalformedTokenError,
@@ -146,7 +147,7 @@ def test_parse_json_refuses_what_rfc_8259_leaves_open(text: str) -> None:
 
 
 def test_parse_json_refuses_json_nested_past_its_cap() -> None:
-    # Python's own limit differs between versions (3.14 reads 50,000 levels).
+    # The cap holds however deep the interpreter's own parser would go.
     for deep in ("[" * 33 + "]" * 33, '{"a":' * 33 + "1" + "}" * 33):
         with pytest.raises(ValueError, match="nested more than 32 deep"):
             parse_json(deep)
@@ -161,13 +162,25 @@ def test_brackets_inside_strings_do_not_count() -> None:
     assert parse_json(text) == {"a": "[" * 40 + '"{'}
 
 
-def test_an_unterminated_string_is_refused_in_linear_time() -> None:
-    text = '{"a":"' + '\\"' * 50_000
+def test_an_unterminated_string_ends_the_depth_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scanning on would retry every later quote, in quadratic time."""
+    text = '{"a":"' + '\\"' * 1_000
+    tokens: list[str] = []
+    pattern = jws._JSON_TOKEN
 
-    started = time.monotonic()
+    class Counting:
+        def finditer(self, string: str) -> Iterator[re.Match[str]]:
+            for match in pattern.finditer(string):
+                tokens.append(match.group())
+                yield match
+
+    monkeypatch.setattr(jws, "_JSON_TOKEN", Counting())
+
     with pytest.raises(ValueError):
         parse_json(text)
-    assert time.monotonic() - started < 0.5
+    assert tokens == ["{", '"a"', '"']
 
 
 def test_parse_json_reads_utf8_bytes_only() -> None:

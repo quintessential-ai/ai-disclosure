@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import tracemalloc
 from pathlib import Path
 from typing import Any, Self
 
@@ -111,3 +112,24 @@ class FakeResponse:
 
     def read(self, limit: int) -> bytes:
         return self.body[:limit]
+
+
+class AllocationPeak:
+    """The most memory held at once inside the block, over what was held at its start.
+
+    Starts and stops ``tracemalloc`` only if it was not already tracing.
+    """
+
+    def __enter__(self) -> Self:
+        self._started = not tracemalloc.is_tracing()
+        if self._started:
+            tracemalloc.start()
+        tracemalloc.reset_peak()
+        self._baseline = tracemalloc.get_traced_memory()[0]
+        self.bytes = 0
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.bytes = tracemalloc.get_traced_memory()[1] - self._baseline
+        if self._started:
+            tracemalloc.stop()
