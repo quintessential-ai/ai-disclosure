@@ -104,6 +104,7 @@ def main(argv: list[str]) -> int:
     for problem in problems:
         print(f"{path}: {problem}", file=sys.stderr)
     if not problems:
+        assert isinstance(document, dict)  # check_key_set accepted it
         count = len(document["keys"])
         print(f"{path}: ok ({count} key{'s' if count != 1 else ''})")
     return 1 if problems else 0
