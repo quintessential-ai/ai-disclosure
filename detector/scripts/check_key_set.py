@@ -9,7 +9,6 @@ line per problem otherwise. The rules are those of KEYS.md.
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 
@@ -20,6 +19,7 @@ from ai_disclosure_verify.jws import (
     b64url_decode,
     jwk_thumbprint,
     keys_from_jwks,
+    parse_json,
 )
 
 DEFAULT_PATH = (
@@ -85,7 +85,9 @@ def check_key_set(document: object) -> list[str]:
 def main(argv: list[str]) -> int:
     path = Path(argv[1]) if len(argv) > 1 else DEFAULT_PATH
     try:
-        document = json.loads(path.read_text(encoding="utf-8"))
+        # The checkers' own parser: a set they would refuse, say for a
+        # repeated member name, fails here too.
+        document = parse_json(path.read_bytes())
     except OSError as exc:
         print(f"{path}: cannot read: {exc.strerror or exc}", file=sys.stderr)
         return 1

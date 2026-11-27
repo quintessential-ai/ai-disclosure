@@ -100,3 +100,18 @@ def test_not_a_jwks_fails(tmp_path: Path, capsys) -> None:
     code, out = run(tmp_path, [1], capsys)
     assert code == 1
     assert '"keys" array' in out.err
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param('{"keys": [], "keys": []}', id="repeated member"),
+        pytest.param('{"keys": [NaN]}', id="NaN"),
+        pytest.param('\ufeff{"keys": []}', id="byte-order mark"),
+        pytest.param('{"keys": []' + ', "x": ' + "[" * 40 + "]" * 40 + "}", id="deep"),
+    ],
+)
+def test_json_checkers_refuse_fails(tmp_path: Path, capsys, raw: str) -> None:
+    code, out = run(tmp_path, raw, capsys)
+    assert code == 1
+    assert "not valid JSON" in out.err
