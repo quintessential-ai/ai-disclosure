@@ -1,0 +1,839 @@
+# Generated from the reference implementation. Do not edit by hand:
+# changes are made there and regenerated.
+"""Reference detector: find, verify and place disclosure markers in a received message.
+
+Reads the ``X-Complexio-AI-Disclosure`` header and every in-body
+``data-ai-disclosure`` block, checks each token's claims and signature,
+recomputes the content digest, and says which marker is the message's own
+(``original``) and which arrived inside a quoted reply trail (``quoted``).
+
+A signature vouches for the text of one content container, not for the
+message around it: a signed fragment can be copied into any message. So a
+marker counts as the message's own only when its container opens the
+message, and the report says whether the message carries anything outside
+its container beyond the document's empty scaffolding. Placement, coverage
+and markup outside the allowlist are read from html5lib's HTML5 parse tree
+(``canonical.scan_html``).
+"""
+
+from __future__ import annotations
+
+import re
+import zipfile
+from dataclasses import dataclass, field, replace
+from email import message_from_bytes, policy
+from enum import StrEnum
+from typing import TYPE_CHECKING, Any
+from xml.etree import ElementTree
+
+from defusedxml.common import DefusedXmlException
+
+from ai_disclosure_verify.canonical import (
+    MESSAGE_CANONICALISATIONS,
+    ContentRegion,
+    DocumentScan,
+    UnparseableHtmlError,
+    scan_html,
+)
+from ai_disclosure_verify.files import (
+    OOXML_CANONICALISATION,
+    PDF_CANONICALISATION,
+    is_ooxml,
+    is_pdf,
+    ooxml_digest_and_streams,
+    ooxml_token,
+    ooxml_uncovered,
+    pdf_digest,
+    pdf_token,
+)
+from ai_disclosure_verify.jws import (
+    ALG_EDDSA,
+    ALG_NONE,
+    HEADER_MEMBERS,
+    MalformedTokenError,
+    SignatureStatus,
+    check_signature,
+    decode_compact,
+    parse_json,
+)
+from ai_disclosure_verify.constants import (
+    AI_GENERATED_HEADER,
+    DISCLOSURE_HEADER,
+    SPEC,
+    TOKEN_TYPE,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
+    from email.message import MIMEPart
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+_MID = re.compile(r"[0-9a-f]{32}")
+
+
+class MessageDecodeError(ValueError):
+    """The message or file could not be decoded far enough to look for markers."""
+
+
+class Carrier(StrEnum):
+    """Where a marker was found."""
+
+    HEADER = "header"
+    BODY = "body"
+    # An Office file's custom property, or a PDF's Info dictionary or XMP.
+    FILE_METADATA = "file_metadata"
+
+
+class Placement(StrEnum):
+    """Whether a marker labels this message or a copy quoted in it."""
+
+    ORIGINAL = "original"
+    QUOTED = "quoted"
+    # A pre-signing marker has no content container to place it by.
+    UNKNOWN = "unknown"
+
+
+class ContentCheck(StrEnum):
+    """Outcome of recomputing the content digest."""
+
+    MATCH = "match"
+    MISMATCH = "mismatch"
+    NOT_FOUND = "content_not_found"
+    # The header's content is in the body, but not where the message's own
+    # content sits: quoted, nested, or after other text.
+    NOT_LEADING = "content_not_leading"
+    UNSUPPORTED = "unsupported_canonicalisation"
+
+
+class Verdict(StrEnum):
+    """The message-level answer."""
+
+    # The specification's verdict table defines each value.
+    VERIFIED = "verified"
+    VERIFIED_WITH_UNMARKED_CONTENT = "verified_with_unmarked_content"
+    UNVERIFIED = "ai_marked_unverified"
+    QUOTED_ONLY = "quoted_only"
+    NONE = "no_marker"
+    # The HTML body is too large or too deep, or the parser failed on it.
+    UNPARSEABLE = "unparseable"
+
+
+SIGNATURE_MEANING: dict[SignatureStatus, str] = {
+    SignatureStatus.VALID: "signed by a key in the supplied key set",
+    SignatureStatus.INVALID: "signature does not verify: the marker was forged or altered",
+    SignatureStatus.UNSIGNED: (
+        "the marker states AI generation but proves nothing about its origin"
+    ),
+    SignatureStatus.UNKNOWN_KEY: "signed with a key that is not in the supplied key set",
+    SignatureStatus.NOT_CHECKED: "signature not checked: no key set was supplied",
+}
+
+CONTENT_MEANING: dict[ContentCheck, str] = {
+    ContentCheck.MATCH: "content unchanged since signing",
+    ContentCheck.MISMATCH: (
+        "content changed after signing: edited by a person before or after "
+        "sending, or altered in transit"
+    ),
+    ContentCheck.NOT_FOUND: (
+        "the signed content was not found in the message: removed in transit"
+    ),
+    ContentCheck.NOT_LEADING: (
+        "the signed content does not open the message (quoted, nested or after "
+        "other text), so the marker is not this message's own"
+    ),
+    ContentCheck.UNSUPPORTED: (
+        "the marker uses a content rule this detector does not support"
+    ),
+}
+
+# A file is not changed in transit the way a message is: these replace the
+# message wording for a file's marker.
+FILE_CONTENT_MEANING: dict[ContentCheck, str] = {
+    ContentCheck.MISMATCH: "file content changed after signing",
+    ContentCheck.NOT_FOUND: "the signed content was not found in the file",
+}
+
+VERDICT_MEANING: dict[Verdict, str] = {
+    Verdict.VERIFIED: (
+        "AI-generated by Complexio's system: the message's own marker is genuine, "
+        "its words and links are the ones signed (spacing and presentation are "
+        "not covered), and the message holds nothing else; a plain-text "
+        "alternative to the HTML body is not checked"
+    ),
+    Verdict.VERIFIED_WITH_UNMARKED_CONTENT: (
+        "the signed text is intact, but styling or markup in or around it, "
+        "which could change how it is shown, is not vouched for, nor is the "
+        "rest of the message (such as a quoted reply or another part of an "
+        "email); see disallowed_markup, and do not attribute any of it to the "
+        "marker"
+    ),
+    Verdict.UNVERIFIED: (
+        "marked as AI-generated, but the message's own marker does not verify; "
+        "see the findings (for example, content changed after signing)"
+    ),
+    Verdict.QUOTED_ONLY: (
+        "only quoted copies of marked messages; this message itself is not marked"
+    ),
+    Verdict.NONE: "no AI disclosure marker found",
+    Verdict.UNPARSEABLE: (
+        "the HTML body could not be read safely (too large, nested too deep, "
+        "or the parser failed); nothing in it is verified"
+    ),
+}
+
+
+# A file's verdicts, where the message's would describe what a file does not have.
+FILE_VERDICT_MEANING: dict[Verdict, str] = {
+    **VERDICT_MEANING,
+    Verdict.VERIFIED: (
+        "AI-generated by Complexio's system: the file's marker is genuine, and "
+        "its content, apart from the properties that carry the marker, is the "
+        "content signed"
+    ),
+    Verdict.VERIFIED_WITH_UNMARKED_CONTENT: (
+        "the signed content is intact, but the file holds bytes the marker does "
+        "not cover (in a PDF, the update that added the marker; in an Office "
+        "file, bytes outside its package's records or in fields the format "
+        "does not need); do not attribute them to the marker"
+    ),
+    Verdict.UNVERIFIED: (
+        "marked as AI-generated, but the file's marker does not verify; see "
+        "the findings (for example, content changed after signing)"
+    ),
+}
+
+
+@dataclass(frozen=True)
+class Finding:
+    """One marker and what checking it showed."""
+
+    carrier: Carrier
+    placement: Placement
+    signature: SignatureStatus
+    content: ContentCheck
+    claims: dict[str, Any] = field(default_factory=dict)
+    kid: str | None = None
+    legacy: bool = False
+    error: str | None = None
+
+    @property
+    def verified(self) -> bool:
+        """Claims well-formed, signature valid against the key set, digest matching."""
+        return (
+            self.error is None
+            and self.signature is SignatureStatus.VALID
+            and self.content is ContentCheck.MATCH
+        )
+
+    @property
+    def content_meaning(self) -> str:
+        """What the content check means, said of a file when the marker is a file's."""
+        if self.carrier is Carrier.FILE_METADATA:
+            return FILE_CONTENT_MEANING.get(self.content, CONTENT_MEANING[self.content])
+        return CONTENT_MEANING[self.content]
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-ready form for the CLI."""
+        return {
+            "carrier": self.carrier.value,
+            "placement": self.placement.value,
+            "signature": self.signature.value,
+            "content": self.content.value,
+            "signature_meaning": SIGNATURE_MEANING[self.signature],
+            "content_meaning": self.content_meaning,
+            "verified": self.verified,
+            "kid": self.kid,
+            "legacy": self.legacy,
+            "error": self.error,
+            "claims": self.claims,
+        }
+
+
+@dataclass(frozen=True)
+class DisallowedMarkup:
+    """Markup outside the allowlist in a message.
+
+    ``first`` names the first violation inside the original container, else
+    the first in the message, as ``inside:NAME`` or ``outside:NAME``; see
+    ``canonical.Violation`` for the names.
+    """
+
+    first: str
+    count: int
+    inside: int
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-ready form for the CLI."""
+        return {"first": self.first, "count": self.count, "inside": self.inside}
+
+
+@dataclass(frozen=True)
+class DetectionReport:
+    """Every marker found in one message, plus the ``X-AI-Generated`` flag.
+
+    ``unmarked_content`` is set when the message's own marker was found and the
+    message has text, links, images or any other element outside its content
+    container, beyond the document's scaffolding and the marker block, or, in
+    an email, another part a reader may see other than a plain-text
+    alternative to the HTML body (see ``detect_message``). A PDF with a marker
+    always sets it, and an Office file with a marker sets it when it holds a
+    byte the marker does not cover.
+    ``disallowed_markup`` describes markup outside the allowlist, placed
+    against the original container. ``unparseable`` says why the HTML could
+    not be read; the findings are then empty.
+    """
+
+    findings: tuple[Finding, ...]
+    ai_generated_header: str | None = None
+    unmarked_content: bool = False
+    disallowed_markup: DisallowedMarkup | None = None
+    unparseable: str | None = None
+
+    @property
+    def meaning(self) -> str:
+        """The verdict in plain language, worded for a file when the marker is a file's."""
+        if any(f.carrier is Carrier.FILE_METADATA for f in self.findings):
+            return FILE_VERDICT_MEANING[self.verdict]
+        return VERDICT_MEANING[self.verdict]
+
+    @property
+    def verdict(self) -> Verdict:
+        """The message-level answer; see ``Verdict``."""
+        if self.unparseable is not None:
+            return Verdict.UNPARSEABLE
+        originals = [f for f in self.findings if f.placement is Placement.ORIGINAL]
+        if any(f.verified for f in originals):
+            if self.disallowed_markup is not None or self.unmarked_content:
+                return Verdict.VERIFIED_WITH_UNMARKED_CONTENT
+            return Verdict.VERIFIED
+        unplaced = any(f.placement is Placement.UNKNOWN for f in self.findings)
+        if originals or unplaced or self.ai_generated_header is not None:
+            return Verdict.UNVERIFIED
+        if self.findings:
+            return Verdict.QUOTED_ONLY
+        return Verdict.NONE
+
+    def describe(self) -> str:
+        """A plain-language account of the report, one fact per line.
+
+        Every value taken from the message is escaped, so none can start a
+        line of its own or send a terminal control sequence.
+        """
+        lines = [
+            f"Verdict: {self.verdict.value}",
+            f"  {self.meaning}",
+            f"Content outside the marker: {'yes' if self.unmarked_content else 'no'}",
+        ]
+        if self.unparseable is not None:
+            lines.append(f"Unparseable: {_escaped(self.unparseable)}")
+        markup = self.disallowed_markup
+        if markup is not None:
+            lines.append(
+                f"Markup outside the allowlist: {markup.count} "
+                f"({markup.inside} inside the marker's content), "
+                f"first {_escaped(markup.first)}"
+            )
+        if self.ai_generated_header is not None:
+            lines.append(f"X-AI-Generated: {_quoted(self.ai_generated_header)}")
+        for number, finding in enumerate(self.findings, start=1):
+            lines.append(
+                f"Marker {number} ({finding.carrier.value}, {finding.placement.value})"
+                f": on behalf of {_quoted(finding.claims.get('on_behalf_of'))}"
+                f", key {_quoted(finding.kid) if finding.kid is not None else 'none'}"
+            )
+            lines.append(
+                f"  signature: {finding.signature.value}: "
+                f"{SIGNATURE_MEANING[finding.signature]}"
+            )
+            lines.append(
+                f"  content: {finding.content.value}: {finding.content_meaning}"
+            )
+            if finding.legacy:
+                lines.append("  earlier, unsigned marker format")
+            if finding.error:
+                lines.append(f"  rejected: {_escaped(finding.error)}")
+        return "\n".join(lines)
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-ready form for the CLI."""
+        return {
+            "verdict": self.verdict.value,
+            "meaning": self.meaning,
+            "x_ai_generated": self.ai_generated_header,
+            "unmarked_content": self.unmarked_content,
+            "disallowed_markup": (
+                self.disallowed_markup.to_dict() if self.disallowed_markup else None
+            ),
+            "unparseable": self.unparseable,
+            "findings": [f.to_dict() for f in self.findings],
+        }
+
+
+# Printable characters escaped all the same, so a quoted value cannot end early.
+_ESCAPES = {"\\": "\\\\", '"': '\\"'}
+
+
+def _escaped(text: str) -> str:
+    """``text`` with ``\\``, ``"`` and unprintable characters as Python escapes."""
+    return "".join(
+        _ESCAPES.get(ch, ch) if ch.isprintable() else ascii(ch)[1:-1] for ch in text
+    )
+
+
+def _quoted(value: object) -> str:
+    """A value taken from the message, quoted and escaped; ``?`` when absent."""
+    if value is None:
+        return "?"
+    if not isinstance(value, str):
+        return f"({type(value).__name__}, not a string)"
+    return f'"{_escaped(value)}"'
+
+
+def detect_html(
+    document: str,
+    keys: Mapping[str, Ed25519PublicKey] | None = None,
+    *,
+    header_token: str | None = None,
+    ai_generated_header: str | None = None,
+) -> DetectionReport:
+    """Detect markers in an HTML body, plus a header token when the caller has one.
+
+    The original is the body marker whose content container leads the
+    document (no text before it, not inside a ``blockquote`` or another
+    container). With a header token it must also share the header's ``mid``;
+    a header whose content does not lead the document is ``NOT_LEADING``.
+    A document ``scan_html`` cannot read gives an empty, ``unparseable`` report.
+    """
+    return _detect_html(
+        document,
+        keys,
+        header_token=header_token,
+        ai_generated_header=ai_generated_header,
+    )[0]
+
+
+def _detect_html(
+    document: str,
+    keys: Mapping[str, Ed25519PublicKey] | None,
+    *,
+    header_token: str | None,
+    ai_generated_header: str | None,
+) -> tuple[DetectionReport, ContentRegion | None]:
+    """``detect_html``'s report, with the original's content container if any."""
+    try:
+        scan = scan_html(document)
+    except UnparseableHtmlError as exc:
+        return DetectionReport((), ai_generated_header, unparseable=str(exc)), None
+    findings: list[Finding] = []
+    header_mid: str | None = None
+    if header_token is not None:
+        header = _check_token(
+            header_token, scan, keys, Carrier.HEADER, Placement.ORIGINAL
+        )
+        header_mid = _mid_of(header)
+        region = scan.regions.get(header_mid or "")
+        if region is not None and not region.leads:
+            header = replace(header, content=ContentCheck.NOT_LEADING)
+        findings.append(header)
+    original_region: ContentRegion | None = None
+    # Index in ``body``, which is also the marker's ``order``.
+    original: int | None = None
+    body: list[Finding] = []
+    orphan: int | None = None
+    for marker in scan.markers:
+        finding = _check_token(marker.value, scan, keys, Carrier.BODY, Placement.QUOTED)
+        if finding.legacy:
+            finding = replace(finding, placement=Placement.UNKNOWN)
+        if finding.placement is not Placement.QUOTED:
+            body.append(finding)
+            continue
+        mid = _mid_of(finding)
+        region = scan.regions.get(mid or "")
+        own = header_mid is None or mid == header_mid
+        if original_region is None and region is not None and region.leads and own:
+            original_region = region
+            original = len(body)
+            finding = replace(finding, placement=Placement.ORIGINAL)
+        elif region is None and marker.leads and own and orphan is None:
+            orphan = len(body)
+        body.append(finding)
+    if original_region is None and orphan is not None:
+        # The message's own marker block, its container removed in transit.
+        body[orphan] = replace(body[orphan], placement=Placement.ORIGINAL)
+    findings.extend(body)
+    if original_region is None and header_mid is not None:
+        candidate = scan.regions.get(header_mid)
+        original_region = candidate if candidate and candidate.leads else None
+    # The original's hidden block is markup, not content, unless it fails
+    # while another original verifies: then it is a block copied in.
+    vouched = any(f.verified for f in findings if f.placement is Placement.ORIGINAL)
+    own_block = (
+        original
+        if original is not None and (body[original].verified or not vouched)
+        else None
+    )
+    report = DetectionReport(
+        tuple(findings),
+        ai_generated_header,
+        unmarked_content=(
+            original_region is not None
+            and scan.has_content_outside(original_region, own_block)
+        ),
+        disallowed_markup=_disallowed_markup(
+            scan, original_region.mid if original_region else None
+        ),
+    )
+    return report, original_region
+
+
+def _disallowed_markup(scan: DocumentScan, mid: str | None) -> DisallowedMarkup | None:
+    if not scan.violations:
+        return None
+    located = [violation.located(mid) for violation in scan.violations]
+    inside = [name for name in located if name.startswith("inside:")]
+    return DisallowedMarkup(
+        first=(inside or located)[0], count=len(located), inside=len(inside)
+    )
+
+
+def detect_message(
+    raw: bytes, keys: Mapping[str, Ed25519PublicKey] | None = None
+) -> DetectionReport:
+    """Detect markers in an RFC 5322 message (an ``.eml`` file).
+
+    The HTML body is the part ``get_body`` prefers as HTML. Every other part a
+    reader may see is content outside the marker, except a plain-text
+    alternative to the HTML body, which Exchange adds to most mail; the
+    specification's Verifying a message, step 7, sets out which parts count.
+
+    Raises:
+        MessageDecodeError: The HTML part declares a charset Python cannot
+            decode, or the message nests parts too deeply to parse.
+
+    """
+    return _detect_message(raw, keys)[0]
+
+
+def _detect_message(
+    raw: bytes, keys: Mapping[str, Ed25519PublicKey] | None
+) -> tuple[DetectionReport, bool]:
+    """``detect_message``'s report, and whether the message has an HTML body."""
+    try:
+        message = message_from_bytes(raw, policy=policy.default)
+        body = message.get_body(preferencelist=("html",))
+        document = body.get_content() if body is not None else ""
+        others = _other_parts(message, body)
+    except (LookupError, ValueError) as exc:
+        # A charset the codec registry cannot decode the part with.
+        msg = f"cannot decode the HTML part: {exc}"
+        raise MessageDecodeError(msg) from exc
+    except RecursionError as exc:
+        msg = "cannot read the message: its parts are nested too deeply"
+        raise MessageDecodeError(msg) from exc
+    header_token = message.get(DISCLOSURE_HEADER)
+    flag = message.get(AI_GENERATED_HEADER)
+    report, region = _detect_html(
+        document,
+        keys,
+        header_token=str(header_token).strip() if header_token is not None else None,
+        ai_generated_header=str(flag).strip() if flag is not None else None,
+    )
+    if region is not None and others:
+        report = replace(report, unmarked_content=True)
+    return report, body is not None
+
+
+def _other_parts(message: MIMEPart, body: MIMEPart | None) -> list[MIMEPart]:
+    """The leaf parts a reader may see besides ``body``.
+
+    Leaves out attachments and their contents, and a ``text/plain`` part
+    that is a direct child of a ``multipart/alternative`` part holding
+    ``body``: the plain-text alternative to the HTML.
+    """
+    parents: dict[int, MIMEPart] = {}
+    leaves: list[MIMEPart] = []
+    # A stack rather than recursion: parts can nest deeper than Python's stack.
+    pending = [message]
+    while pending:
+        part = pending.pop()
+        if part is body or part.get_content_disposition() == "attachment":
+            continue
+        if part.is_multipart():
+            for child in part.iter_parts():
+                parents[id(child)] = part
+                pending.append(child)
+        else:
+            leaves.append(part)
+    holding_body: set[int] = set()
+    node = body
+    while node is not None and id(node) in parents:
+        node = parents[id(node)]
+        holding_body.add(id(node))
+    return [
+        leaf for leaf in leaves if not _is_alternative_text(leaf, parents, holding_body)
+    ]
+
+
+def _is_alternative_text(
+    part: MIMEPart, parents: Mapping[int, MIMEPart], holding_body: set[int]
+) -> bool:
+    parent = parents.get(id(part))
+    return (
+        part.get_content_type() == "text/plain"
+        and parent is not None
+        and parent.get_content_type() == "multipart/alternative"
+        and id(parent) in holding_body
+    )
+
+
+# The first line of an RFC 5322 header field, or an mbox "From " line.
+_HEADER_FIELD = re.compile(rb"[!-9;-~]+:|From ")
+_HTML_TAG = re.compile(rb"<[!/A-Za-z]")
+_MARKER_ATTRIBUTE = re.compile(rb"data-ai-disclosure", re.IGNORECASE)
+
+
+def detect_file(
+    data: bytes, keys: Mapping[str, Ed25519PublicKey] | None = None
+) -> DetectionReport:
+    """Detect markers in an Office (OOXML) file, a PDF, a bare HTML document or an RFC 5322 message.
+
+    The form is read from how the input starts, never its name, as the
+    specification's "Reading the input" sets out.
+
+    Raises:
+        MessageDecodeError: The file could not be read far enough to look
+            for markers, or nests elements or parts too deeply to read.
+
+    """
+    try:
+        return _detect_file(data, keys)
+    except RecursionError as exc:
+        # Like an HTML body over the depth cap: too deep to read safely.
+        msg = "cannot read the file: it is nested too deeply"
+        raise MessageDecodeError(msg) from exc
+
+
+def _detect_file(
+    data: bytes, keys: Mapping[str, Ed25519PublicKey] | None
+) -> DetectionReport:
+    text = data.removeprefix(b"\xef\xbb\xbf").lstrip()
+    # A file is recognised only from its first byte.
+    if is_pdf(data):
+        return _detect_pdf(data, keys)
+    if is_ooxml(data):
+        return _detect_ooxml(data, keys)
+    # An editor may put a UTF-8 byte-order mark before the markup.
+    if text.startswith(b"<"):
+        return detect_html(data.decode("utf-8-sig", errors="replace"), keys)
+    if _HEADER_FIELD.match(text):
+        return _detect_header_led(data, text, keys)
+    if _HTML_TAG.search(text):
+        return detect_html(data.decode("utf-8-sig", errors="replace"), keys)
+    return detect_message(text, keys)
+
+
+def _detect_header_led(
+    data: bytes, text: bytes, keys: Mapping[str, Ed25519PublicKey] | None
+) -> DetectionReport:
+    """A message, or the HTML fragment a header-like first line starts.
+
+    Which reading stands is the specification's, in Reading the input.
+    """
+    report, has_html = _detect_message(text, keys)
+    if has_html or report.verdict is not Verdict.NONE or not _HTML_TAG.search(text):
+        return report
+    as_html = detect_html(data.decode("utf-8-sig", errors="replace"), keys)
+    if as_html.findings or (
+        as_html.unparseable is not None and _MARKER_ATTRIBUTE.search(text)
+    ):
+        return as_html
+    return report
+
+
+# The errors of a token that does not decode, as opposed to one that decodes
+# and breaks a rule.
+_MALFORMED_TOKEN = "malformed token"
+_MALFORMED_LEGACY = "malformed legacy marker"
+
+
+# What reading a hostile Office package can raise. ``files`` turns a part's
+# read errors into ValueError; opening the package raises NotImplementedError
+# for an entry whose zip version it cannot extract.
+_PACKAGE_ERRORS = (
+    zipfile.BadZipFile,
+    NotImplementedError,
+    ElementTree.ParseError,
+    DefusedXmlException,
+    ValueError,
+)
+
+
+def _detect_ooxml(
+    data: bytes, keys: Mapping[str, Ed25519PublicKey] | None
+) -> DetectionReport:
+    try:
+        token = ooxml_token(data)
+    except _PACKAGE_ERRORS as exc:
+        msg = f"cannot read the Office package: {exc}"
+        raise MessageDecodeError(msg) from exc
+    # What the digest's read found of the parts' streams, so coverage needs
+    # no second read; False when that read failed.
+    streams: dict[str, bool] = {}
+
+    def digest() -> str:
+        streams["complete"] = False
+        value, streams["complete"] = ooxml_digest_and_streams(data)
+        return value
+
+    report = _detect_document(token, keys, OOXML_CANONICALISATION, digest)
+    if token is None:
+        return report
+    # Bytes outside the package's records, or after a part's stream, are not
+    # covered by its marker.
+    return replace(
+        report,
+        unmarked_content=ooxml_uncovered(
+            data, streams_complete=streams.get("complete")
+        ),
+    )
+
+
+def _detect_pdf(
+    data: bytes, keys: Mapping[str, Ed25519PublicKey] | None
+) -> DetectionReport:
+    found = pdf_token(data)
+    report = _detect_document(
+        found[0] if found else None,
+        keys,
+        PDF_CANONICALISATION,
+        lambda: pdf_digest(found[1] if found else b""),
+    )
+    # The update that carries the marker is never covered by it.
+    return replace(report, unmarked_content=found is not None)
+
+
+def _detect_document(
+    token: str | None,
+    keys: Mapping[str, Ed25519PublicKey] | None,
+    canon: str,
+    digest: Callable[[], str],
+) -> DetectionReport:
+    """Check the file marker against its canonical content or original PDF revision."""
+    if token is None:
+        return DetectionReport(())
+    finding = _check_token(token, None, keys, Carrier.FILE_METADATA, Placement.ORIGINAL)
+    if not finding.claims:
+        return DetectionReport((finding,))
+    if finding.claims.get("canon") != canon:
+        content = ContentCheck.UNSUPPORTED
+    else:
+        try:
+            matches = digest() == finding.claims.get("content_sha256")
+        except _PACKAGE_ERRORS:
+            content = ContentCheck.NOT_FOUND
+        else:
+            content = ContentCheck.MATCH if matches else ContentCheck.MISMATCH
+    return DetectionReport((replace(finding, content=content),))
+
+
+def _mid_of(finding: Finding) -> str | None:
+    mid = finding.claims.get("mid")
+    return mid if isinstance(mid, str) else None
+
+
+def _check_token(
+    value: str,
+    scan: DocumentScan | None,
+    keys: Mapping[str, Ed25519PublicKey] | None,
+    carrier: Carrier,
+    placement: Placement,
+) -> Finding:
+    if value.lstrip().startswith("{"):
+        return _legacy_finding(value, carrier, placement)
+    try:
+        token = decode_compact(value)
+    except MalformedTokenError as exc:
+        return Finding(
+            carrier=carrier,
+            # A body token that cannot be read names no container to place it
+            # by; it is still an attempt at a marker.
+            placement=Placement.UNKNOWN if carrier is Carrier.BODY else placement,
+            signature=SignatureStatus.INVALID,
+            content=ContentCheck.NOT_FOUND,
+            error=f"{_MALFORMED_TOKEN}: {exc}",
+        )
+    claims = token.payload
+    kid = token.header.get("kid")
+    return Finding(
+        carrier=carrier,
+        placement=placement,
+        signature=check_signature(token, keys),
+        content=_check_content(claims, scan)
+        if scan is not None
+        else ContentCheck.NOT_FOUND,
+        claims=claims,
+        kid=str(kid) if kid is not None else None,
+        error=_claims_error(token.header, claims),
+    )
+
+
+def _claims_error(header: Mapping[str, Any], claims: Mapping[str, Any]) -> str | None:
+    """Why the token is not a version-1 disclosure marker, or None when it is."""
+    if header.get("typ") != TOKEN_TYPE:
+        return f"unsupported typ {header.get('typ')!r}"
+    if extra := sorted(set(header) - HEADER_MEMBERS):
+        return f"unsupported header members {extra!r}"
+    if not isinstance(header.get("kid", ""), str):
+        return "header kid is not a string"
+    # A tuple compares by equality, so an unhashable alg is refused, not raised.
+    if header.get("alg") not in (ALG_EDDSA, ALG_NONE):
+        return f"unsupported alg {header.get('alg')!r}"
+    if header.get("alg") == ALG_NONE and "kid" in header:
+        return "an unsigned token names a kid"
+    if claims.get("spec") != SPEC:
+        return f"unsupported spec {claims.get('spec')!r}"
+    if claims.get("ai_generated") is not True:
+        return "ai_generated is not true"
+    for name in ("generator", "on_behalf_of", "canon", "content_sha256"):
+        if not isinstance(claims.get(name), str) or not claims[name]:
+            return f"claim {name} missing or not a string"
+    if not isinstance(claims.get("mid"), str) or not _MID.fullmatch(claims["mid"]):
+        return "claim mid is not 32 lowercase hex characters"
+    iat = claims.get("iat")
+    if not isinstance(iat, int) or isinstance(iat, bool):
+        return "claim iat missing or not an integer"
+    return None
+
+
+def _check_content(claims: Mapping[str, Any], scan: DocumentScan) -> ContentCheck:
+    canon = claims.get("canon")
+    if not isinstance(canon, str) or canon not in MESSAGE_CANONICALISATIONS:
+        return ContentCheck.UNSUPPORTED
+    region = scan.regions.get(str(claims.get("mid", "")))
+    if region is None:
+        return ContentCheck.NOT_FOUND
+    # The region caches its digest, so many markers naming it cost one hash.
+    if region.digest(str(canon)) == claims.get("content_sha256"):
+        return ContentCheck.MATCH
+    return ContentCheck.MISMATCH
+
+
+def _legacy_finding(value: str, carrier: Carrier, placement: Placement) -> Finding:
+    """The pre-signing JSON marker: still a disclosure, never verifiable."""
+    try:
+        claims = parse_json(value)
+    except ValueError as exc:
+        claims, error = {}, f"{_MALFORMED_LEGACY}: {exc}"
+    else:
+        error = None if isinstance(claims, dict) else _MALFORMED_LEGACY
+        claims = claims if isinstance(claims, dict) else {}
+    return Finding(
+        carrier=carrier,
+        placement=placement,
+        signature=SignatureStatus.UNSIGNED,
+        content=ContentCheck.NOT_FOUND,
+        claims=claims,
+        legacy=True,
+        error=error,
+    )

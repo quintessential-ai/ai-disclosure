@@ -1,0 +1,55 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ai-disclosure-verify"
+version = "0.1.0"
+description = "Verify the AI-disclosure marker in an email: detect, check the signature, read the verdict."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+dependencies = [
+    "cryptography>=43",
+    "defusedxml>=0.7.1",
+    # The parser subclasses html5lib internals, so a new release is taken on
+    # purpose.
+    "html5lib>=1.1,<1.2",
+]
+
+[project.scripts]
+ai-disclosure-verify = "ai_disclosure_verify.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ai_disclosure_verify"]
+
+[tool.hatch.build.targets.sdist]
+# The tests read the vectors from the repository root, so they run from a
+# checkout, not from the sdist.
+include = ["src/ai_disclosure_verify", "README.md", "LICENSE"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# Generated from the reference implementation; kept as it has them.
+"src/ai_disclosure_verify/{canonical,detect,files,jws,constants}.py" = ["I001", "E501", "B904"]
+
+[tool.ty.environment]
+python = ".venv"
+
+[tool.ty.src]
+# Runs against the reference implementation, which is not a dependency here.
+exclude = ["tests/fixtures/generate_fixtures.py"]
