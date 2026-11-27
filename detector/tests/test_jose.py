@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import re
 from collections.abc import Iterator, Mapping
 from typing import Any
@@ -363,6 +364,26 @@ def test_a_kid_shared_with_another_key_type_is_not_a_duplicate() -> None:
     rsa = {"kty": "RSA", "kid": "k", "n": "AQAB", "e": "AQAB"}
 
     assert list(keys_from_jwks({"keys": [rsa, _jwk()]})) == ["k"]
+
+
+def test_a_jwks_names_the_entries_it_skips(caplog: pytest.LogCaptureFixture) -> None:
+    broken = {"kty": "OKP", "crv": "Ed25519", "kid": "broken"}
+    other = Ed25519PrivateKey.generate()
+    twice = _jwk(other, kid="twice")
+
+    with caplog.at_level(logging.WARNING, logger="ai_disclosure_verify.jws"):
+        keys = keys_from_jwks({"keys": [_jwk(), broken, twice, twice]})
+
+    assert list(keys) == ["k"]
+    messages = [record.getMessage() for record in caplog.records]
+    assert messages == [
+        "JWKS entry 1: Ed25519 key not usable, skipped",
+        "JWKS kid 'twice' names more than one key, skipped",
+    ]
+
+
+def test_a_jwks_of_other_key_types_only_is_empty_not_an_error() -> None:
+    assert keys_from_jwks({"keys": [{"kty": "RSA", "n": "x", "e": "AQAB"}]}) == {}
 
 
 @pytest.mark.parametrize("jwks", [[], {"keys": "nope"}, {"key": []}, "x", None])

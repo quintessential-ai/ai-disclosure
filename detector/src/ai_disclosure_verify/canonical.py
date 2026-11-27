@@ -72,12 +72,11 @@ MAX_ATTRIBUTES = 64
 # document of nothing but tags runs to tens of seconds at the byte cap. Mail
 # with a large table stays well under it.
 MAX_ELEMENTS = 200_000
-# html5lib builds each text node, attribute value, comment and name by
-# appending to a string, and places each piece of foster-parented content by
-# scanning the foster parent's children, so many short pieces cost the
-# square of their count (an attribute of a few MB of bare "&" ran to
-# minutes). The parse stops once the characters it copies, or the children
-# it scans, pass these; either takes well under a second to reach.
+# html5lib builds text, attribute values, comments and names by appending to
+# a string, and places foster-parented content by scanning the foster
+# parent's children, so many short pieces cost the square of their count.
+# The parse stops once the characters it copies, or the children it scans,
+# pass these.
 MAX_COPIED_CHARACTERS = 1 << 31
 MAX_FOSTER_SCANS = 1 << 24
 # Each container nested in another is digested on its own, so the digests
@@ -395,7 +394,25 @@ _ITEM_ATTRIBUTES: dict[str, tuple[str, str]] = {
 
 def digest_of_canonical(canonical: str) -> str:
     """Digest of content already in canonical form."""
-    return b64url_encode(hashlib.sha256(canonical.encode("utf-8")).digest())
+    return b64url_encode(hashlib.sha256(_utf8(canonical)).digest())
+
+
+_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def _scalar_values(text: str) -> str:
+    """``text`` as WHATWG's scalar value string, which UTF-8 can encode.
+
+    A surrogate pair becomes the character it encodes and a lone surrogate
+    becomes U+FFFD, as a JavaScript ``TextEncoder`` does, instead of failing.
+    """
+    if _SURROGATE.search(text):
+        return text.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
+    return text
+
+
+def _utf8(text: str) -> bytes:
+    return _scalar_values(text).encode("utf-8")
 
 
 def normalise_url(value: str) -> str:
@@ -645,12 +662,11 @@ class DocumentScan:
     markers: list[BodyMarker]
     items: list[tuple[str, str]]
     violations: list[Violation]
-    # Content elements, and text, URL and attribute-text items that are not
-    # blank, by the mid of the outermost container they sit in (None: in
-    # none). Scaffolding and hidden blocks in their issued shape are not
-    # counted. Counting, rather than comparing canonical lengths, keeps a
-    # combining mark after a container from composing into its last
-    # character unseen.
+    # Content elements and non-blank text, URL and attribute-text items, by
+    # the mid of the outermost container holding them (None: none);
+    # scaffolding and issued-shape hidden blocks are not counted. Counted
+    # rather than compared by length, so a combining mark after a container
+    # cannot compose into it unseen.
     elements: dict[str | None, int]
     content_items: dict[str | None, int]
     # Hidden blocks in their issued shape, by the ``order`` of their marker.

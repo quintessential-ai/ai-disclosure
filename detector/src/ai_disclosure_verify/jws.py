@@ -14,6 +14,7 @@ import base64
 import binascii
 import hashlib
 import json
+import logging
 import re
 from dataclasses import dataclass
 from enum import StrEnum
@@ -25,6 +26,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+logger = logging.getLogger(__name__)
 
 ALG_EDDSA = "EdDSA"
 ALG_NONE = "none"
@@ -158,7 +161,7 @@ def decode_compact(token: str) -> DecodedToken:
         header = parse_json(b64url_decode(parts[0]))
         payload = parse_json(b64url_decode(parts[1]))
         signature = b64url_decode(parts[2])
-    except (ValueError, RecursionError) as exc:
+    except ValueError as exc:
         raise MalformedTokenError(str(exc)) from exc
     if not isinstance(header, dict) or not isinstance(payload, dict):
         msg = "JWS header and payload must be JSON objects"
@@ -216,12 +219,12 @@ def keys_from_jwks(jwks: object) -> dict[str, Ed25519PublicKey]:
     """Read the Ed25519 verification keys of a JWKS document, keyed by ``kid``.
 
     As RFC 7517 section 5 asks, an entry this profile cannot use is skipped
-    rather than failing the set: another key type or curve, a ``use`` other
-    than ``sig``, an ``alg`` other than ``EdDSA``, ``key_ops`` without
-    ``verify``, a ``kid`` that is not a string, or no canonical 32-byte
-    ``x``. An Ed25519 entry without a ``kid`` takes its RFC 7638 thumbprint.
-    The ``kid`` is a name: it is not compared with the thumbprint. A ``kid``
+    rather than failing the set (``_verification_key`` says which). An
+    Ed25519 entry without a ``kid`` takes its RFC 7638 thumbprint. The
+    ``kid`` is a name: it is not compared with the thumbprint. A ``kid``
     that two usable entries share names no key, since either could be meant.
+    An Ed25519 entry skipped, and a shared ``kid``, are logged as warnings:
+    a marker signed with that key would otherwise read as an unknown key.
 
     Raises:
         JwksError: The document is not a JSON object with a ``keys`` array.
@@ -232,14 +235,25 @@ def keys_from_jwks(jwks: object) -> dict[str, Ed25519PublicKey]:
         raise JwksError(msg)
     keys: dict[str, Ed25519PublicKey] = {}
     shared: set[str] = set()
-    for entry in jwks["keys"]:
+    for position, entry in enumerate(jwks["keys"]):
+        claims_ed25519 = (
+            isinstance(entry, dict)
+            and entry.get("kty") == "OKP"
+            and entry.get("crv") == "Ed25519"
+        )
         key = _verification_key(entry)
         if key is None:
+            if claims_ed25519:
+                logger.warning(
+                    "JWKS entry %d: Ed25519 key not usable, skipped", position
+                )
             continue
         kid = entry.get("kid") or jwk_thumbprint(key)
         if kid in keys:
             shared.add(kid)
         keys[kid] = key
+    for kid in sorted(shared):
+        logger.warning("JWKS kid %r names more than one key, skipped", kid)
     return {kid: key for kid, key in keys.items() if kid not in shared}
 
 
