@@ -620,8 +620,8 @@ def _detect_header_led(
     """Input that starts like a header field: a message, or else a file or an HTML fragment.
 
     A message with no HTML body and no marker is read again: as a PDF or
-    Office file when its first 1024 bytes hold that signature, reported when
-    its token decodes; failing that, as HTML when it holds a tag, reported
+    Office file when its first 1024 bytes hold that signature (see
+    ``_header_led_file``); failing that, as HTML when it holds a tag, reported
     when it finds a marker, or when it is ``unparseable`` and the input holds
     ``data-ai-disclosure``. A message that only mentions a signature or the
     property name keeps its own reading.
@@ -629,15 +629,9 @@ def _detect_header_led(
     report, has_html = _detect_message(text, keys)
     if has_html or report.verdict is not Verdict.NONE:
         return report
-    window = data[:_SIGNATURE_WINDOW]
-    if b"%PDF-" in window or b"PK\x03\x04" in window:
-        detect = _detect_pdf if b"%PDF-" in window else _detect_ooxml
-        try:
-            as_file = detect(data, keys)
-        except MessageDecodeError:
-            as_file = None
-        if as_file is not None and any(_decodes(f) for f in as_file.findings):
-            return as_file
+    as_file = _header_led_file(data, keys)
+    if as_file is not None:
+        return as_file
     if not _HTML_TAG.search(text):
         return report
     as_html = detect_html(data.decode("utf-8-sig", errors="replace"), keys)
@@ -646,6 +640,35 @@ def _detect_header_led(
     ):
         return as_html
     return report
+
+
+def _header_led_file(
+    data: bytes, keys: Mapping[str, Ed25519PublicKey] | None
+) -> DetectionReport | None:
+    """Header-led input read as the file whose signature its first 1024 bytes hold, or None.
+
+    The file reading needs a marker, and either a token that decodes or the
+    file itself: for a PDF, a ``%%EOF`` after the header and before the
+    marker; for an Office file, a package that opens. So a malformed marker
+    in a real file stays malformed, while a message that only mentions a
+    signature and the property keeps its own reading.
+    """
+    window = data[:_SIGNATURE_WINDOW]
+    if b"%PDF-" in window:
+        found = pdf_token(data)
+        as_file = _pdf_report(found, keys)
+        is_file = found is not None and b"%PDF-" in found[1]
+    elif b"PK\x03\x04" in window:
+        try:
+            as_file = _detect_ooxml(data, keys)
+        except MessageDecodeError:
+            return None
+        is_file = True
+    else:
+        return None
+    if as_file.findings and (is_file or any(_decodes(f) for f in as_file.findings)):
+        return as_file
+    return None
 
 
 # The errors of a token that does not decode, as opposed to one that decodes
@@ -689,7 +712,12 @@ def _detect_ooxml(
 def _detect_pdf(
     data: bytes, keys: Mapping[str, Ed25519PublicKey] | None
 ) -> DetectionReport:
-    found = pdf_token(data)
+    return _pdf_report(pdf_token(data), keys)
+
+
+def _pdf_report(
+    found: tuple[str, bytes] | None, keys: Mapping[str, Ed25519PublicKey] | None
+) -> DetectionReport:
     report = _detect_document(
         found[0] if found else None,
         keys,

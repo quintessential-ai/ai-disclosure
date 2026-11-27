@@ -60,15 +60,18 @@ def _pdf_name_pattern(name: str) -> bytes:
     )
 
 
+# PDF whitespace (ISO 32000-1, 7.2.2): unlike ``\s``, it includes NUL and not VT.
+_PDF_WHITESPACE = rb"[\x00\t\n\f\r ]"
 # Where the property can be: the Info key as a whole name once its escapes are
-# decoded, or the complete XMP QName as an element or an attribute.
+# decoded, or the complete XMP QName as an element or an attribute. The XMP
+# prefix is matched as written, not resolved to its namespace.
 _PDF_PROPERTY = re.compile(
-    rb"/" + _pdf_name_pattern(FILE_PROPERTY) + rb"(?=[\s()<>\[\]{}/%]|$)"
+    rb"/" + _pdf_name_pattern(FILE_PROPERTY) + rb"(?=[\x00\t\n\f\r ()<>\[\]{}/%]|$)"
     rb"|<cpxai:" + FILE_PROPERTY.encode() + rb"(?=[\s/>])"
     rb"|(?<=\s)cpxai:" + FILE_PROPERTY.encode() + rb"\s*=\s*([\"'])"
 )
 # Whitespace and comments between a key and its value.
-_PDF_SKIP = re.compile(rb"(?:\s|%[^\r\n]*)*")
+_PDF_SKIP = re.compile(rb"(?:" + _PDF_WHITESPACE + rb"|%[^\r\n]*)*")
 # A literal string's parts: plain bytes, an escape, or a parenthesis.
 _PDF_LITERAL_PART = re.compile(rb"[^()\\]+|\\.|[()\\]", re.DOTALL)
 # A PDF literal string escape: a named character, up to three octal digits,
@@ -355,7 +358,7 @@ def _pdf_hex(data: bytes, start: int) -> bytes:
     end = data.find(b">", start)
     if end < 0:
         return b""
-    digits = re.sub(rb"\s", b"", data[start + 1 : end])
+    digits = re.sub(_PDF_WHITESPACE, b"", data[start + 1 : end])
     try:
         # A final odd digit stands for that digit followed by 0.
         return bytes.fromhex((digits + b"0" * (len(digits) % 2)).decode("ascii"))
